@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Search Scraper (Bing-backed, Google-aware)
+google_search_scrapper.py — Search result scraper (Bing-backed, Google-aware).
 
 - Retry logic with exponential backoff
 - Pagination (get 10+ results per query)
@@ -10,16 +10,16 @@ Enhanced Search Scraper (Bing-backed, Google-aware)
 
 Usage:
     # Single query
-    python google_search_scraper.py "solar panels Indonesia" -o results.csv
+    python google_search_scrapper.py "solar panels Indonesia" -o results.csv
 
     # Batch from file
-    python google_search_scraper.py queries.txt --batch -o results.csv --delay 5
+    python google_search_scrapper.py queries.txt --batch -o results.csv --delay 5
 
     # Custom result limit per query
-    python google_search_scraper.py "hotels Bandung" --num-results 50 -o results.json
+    python google_search_scrapper.py "hotels Bandung" --num-results 50 -o results.json
 
     # Save to SQLite for dashboard integration
-    python google_search_scraper.py queries.txt --batch -o results.db --format sqlite
+    python google_search_scrapper.py queries.txt --batch -o results.db --format sqlite
 
 Why the default engine is Bing:
     Google no longer serves search results to plain HTTP clients. A request to
@@ -36,6 +36,8 @@ Why the default engine is Bing:
 Warnings:
     - Search engines block scrapers. Keep --delay sane and monitor rate limits.
     - HTML selectors change; if result counts drop to 0 the parser needs updating.
+    - Scraping SERPs is against the terms of service of both Google and Bing.
+      For anything production-facing or commercial, use an official API.
 """
 
 import argparse
@@ -201,7 +203,7 @@ class SearchScraper:
 
         return results
 
-    def _scrape_page(self, query: str, page: int) -> tuple[list, bool]:
+    def _scrape_page(self, query: str, page: int) -> tuple:
         """
         Scrape one results page (0-indexed).
         Returns (results_list, fetch_succeeded).
@@ -235,7 +237,7 @@ class SearchScraper:
 
         return results, True
 
-    def _scrape_google_page(self, query: str) -> tuple[list, bool]:
+    def _scrape_google_page(self, query: str) -> tuple:
         """
         Attempt Google, and explain the JS wall rather than reporting a silent 0.
         """
@@ -284,8 +286,7 @@ class SearchScraper:
         all_results = []
         seen_urls = set()
 
-        # Ceiling division: 20 results -> 2 pages, 25 -> 3. The old version used
-        # (num_results // 10) + 1, which fetched a needless extra page.
+        # Ceiling division: 20 results -> 2 pages, 25 -> 3.
         total_pages = max(1, -(-num_results // RESULTS_PER_PAGE))
 
         for page in range(total_pages):
@@ -323,6 +324,36 @@ class SearchScraper:
 
         print(f"  Got {len(all_results)} result(s)\n")
         return all_results
+
+    def search_many(self, queries: list, num_results: int = 10, delay: float = 2) -> list:
+        """Run several queries in sequence with a delay between them.
+
+        Added for main.py — returns one flat list of result dicts.
+        """
+        all_results = []
+        for i, query in enumerate(queries, 1):
+            all_results.extend(self.search(query, num_results=num_results))
+            if i < len(queries):
+                print(f"Waiting {delay}s before next query...\n")
+                time.sleep(delay)
+        return all_results
+
+
+def extract_urls(results: list, unique: bool = True) -> list:
+    """Pull just the URLs out of search results, preserving order.
+
+    Added for main.py — this is the handoff point into email_parser.
+    """
+    urls, seen = [], set()
+    for result in results:
+        url = result.get("url", "")
+        if not url:
+            continue
+        if unique and url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
 
 
 def export_csv(results: list, output_path: str) -> None:
@@ -473,13 +504,7 @@ def main():
     else:
         queries = [args.query]
 
-    all_results = []
-    for i, q in enumerate(queries, 1):
-        all_results.extend(scraper.search(q, num_results=args.num_results))
-
-        if i < len(queries):
-            print(f"Waiting {args.delay}s before next query...\n")
-            time.sleep(args.delay)
+    all_results = scraper.search_many(queries, num_results=args.num_results, delay=args.delay)
 
     print()
     export_func(all_results, args.output)

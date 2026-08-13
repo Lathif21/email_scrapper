@@ -1,8 +1,11 @@
-# Search queries for Google scraper (one per line)
-# Lines starting with # are comments and ignored
+# Search queries — one per line, # for comments
+# Tip: exclude aggregators to reach actual business sites
+# e.g. "hotel Bandung kontak -booking.com -traveloka.com"
 
-solar panels Indonesia
-battery energy storage BESS
-hotel Bandung contact
-resort Yogyakarta facilities
-industrial facility manager Indonesia
+# --- Hospitality: West Java ---
+hotel Bandung kontak email
+resort Lembang reservasi hubungi kami
+
+# --- Industrial: Bekasi / Karawang ---
+pabrik Cikarang kontak procurement
+kawasan industri Karawang perusahaan kontak

@@ -1,8 +1,15 @@
-# Scrape outputs
+# Secrets — .env holds SCRAPER_PASSWORD. Never commit it.
+# ('env/' below only covers a virtualenv folder, not this file.)
+.env
+!.env.example
+
+# Scrape outputs (contact data — keep it off GitHub)
 *.csv
 *.json
 *.db
+*.enc
 !queries_example.txt
+!urls_example.txt
 
 # Scraper cache
 .search_cache.json
@@ -20,3 +27,5 @@ env/
 .idea/
 Thumbs.db
 desktop.ini
+
+Output
