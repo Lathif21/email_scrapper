@@ -1,0 +1,22 @@
+# Scrape outputs
+*.csv
+*.json
+*.db
+!queries_example.txt
+
+# Scraper cache
+.search_cache.json
+.google_search_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

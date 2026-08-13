@@ -1,0 +1,8 @@
+# Search queries for Google scraper (one per line)
+# Lines starting with # are comments and ignored
+
+solar panels Indonesia
+battery energy storage BESS
+hotel Bandung contact
+resort Yogyakarta facilities
+industrial facility manager Indonesia
