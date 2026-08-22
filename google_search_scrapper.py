@@ -55,6 +55,8 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
+from secure_files import secure_file
+
 
 HEADERS = {
     "User-Agent": (
@@ -125,6 +127,8 @@ class SearchScraper:
         try:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f, indent=2)
+            # Cached SERPs carry result URLs and snippets in plaintext.
+            secure_file(self.cache_file)
         except Exception as e:
             print(f"[CACHE] Warning: couldn't save cache: {e}")
 

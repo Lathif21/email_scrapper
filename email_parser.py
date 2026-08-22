@@ -53,7 +53,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from html import unescape
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -61,6 +63,8 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
+
+from secure_files import secure_file
 
 # ---------------------------------------------------------------- patterns
 
@@ -201,6 +205,24 @@ CHARSET_META_REGEX = re.compile(rb'''charset=["']?([\w-]+)''', re.IGNORECASE)
 
 # Cache robots.txt lookups so a 50-page crawl of one domain fetches it once.
 _ROBOTS_CACHE = {}
+# In parallel mode several threads read and fill that cache. prefetch_robots()
+# warms it sequentially before the threads start, so this lock normally guards
+# an already-populated dict; it exists so correctness does not depend on the
+# prefetch having covered every base a followed link might reach.
+_ROBOTS_LOCK = threading.Lock()
+
+# How often scrape_urls() hands its results so far to a checkpoint callback.
+# 25 pages is roughly a minute of work at the default delay — small enough that
+# an interrupted run loses little, large enough that rewriting the whole
+# checkpoint file is not the thing the run spends its time on.
+CHECKPOINT_EVERY = 25
+
+# Ceiling on --workers. Past five the extra hosts in flight buy very little and
+# the odds of being blocked go up.
+MAX_WORKERS = 5
+
+# `contacts.csv` -> `contacts.partial.csv`.
+PARTIAL_SUFFIX = ".partial"
 
 
 # ---------------------------------------------------------------- result type
@@ -283,24 +305,28 @@ def is_allowed_by_robots(url: str, user_agent: str = None) -> bool:
         parsed = urlparse(url)
         base = f"{parsed.scheme}://{parsed.netloc}"
 
-        if base not in _ROBOTS_CACHE:
-            rp = RobotFileParser()
-            rp.set_url(f"{base}/robots.txt")
-            # Not rp.read(): it calls urlopen with no timeout, so a host that
-            # accepts the connection and never answers blocks the process
-            # forever — and a hang is not an exception, so no try/except can
-            # catch it. Fetch it here, with a timeout, and feed the parser.
-            try:
-                resp = requests.get(f"{base}/robots.txt", headers=HEADERS,
-                                    timeout=ROBOTS_TIMEOUT)
-                # A 404 means no restrictions, and parse([]) allows everything —
-                # the same fail-open behaviour this has always had.
-                rp.parse(resp.text.splitlines() if resp.status_code == 200 else [])
-                _ROBOTS_CACHE[base] = rp
-            except requests.RequestException:
-                _ROBOTS_CACHE[base] = None  # unreachable -> allow
+        with _ROBOTS_LOCK:
+            if base not in _ROBOTS_CACHE:
+                rp = RobotFileParser()
+                rp.set_url(f"{base}/robots.txt")
+                # Not rp.read(): it calls urlopen with no timeout, so a host
+                # that accepts the connection and never answers blocks the
+                # process forever — and a hang is not an exception, so no
+                # try/except can catch it. Fetch it here, with a timeout, and
+                # feed the parser.
+                try:
+                    resp = requests.get(f"{base}/robots.txt", headers=HEADERS,
+                                        timeout=ROBOTS_TIMEOUT)
+                    # A 404 means no restrictions, and parse([]) allows
+                    # everything — the same fail-open behaviour this has
+                    # always had.
+                    rp.parse(resp.text.splitlines()
+                             if resp.status_code == 200 else [])
+                    _ROBOTS_CACHE[base] = rp
+                except requests.RequestException:
+                    _ROBOTS_CACHE[base] = None  # unreachable -> allow
 
-        rp = _ROBOTS_CACHE[base]
+            rp = _ROBOTS_CACHE[base]
         return True if rp is None else rp.can_fetch(user_agent, url)
     except Exception:
         return True
@@ -1105,10 +1131,57 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
     return result
 
 
+def _result_summary(result: ContactResult) -> str:
+    """The per-URL progress lines, shared by the sequential and parallel loops."""
+    lines = []
+    if result.error:
+        lines.append(f"      -> skipped ({result.error})")
+    elif result.total == 0:
+        lines.append("      -> no contacts found")
+    else:
+        via = ""
+        if result.followed:
+            paths = ", ".join(urlparse(p).path or "/" for p in result.followed)
+            via = f" (via {paths})"
+        lines.append(f"      -> emails={len(result.emails)} "
+                     f"whatsapp={len(result.whatsapp)} phone={len(result.phones)}{via}")
+    if result.followed and result.total == 0:
+        lines.append(f"      -> also read {len(result.followed)} contact page(s), "
+                     "still nothing")
+    return "\n".join(lines)
+
+
+def _run_checkpoint(callback, every: int, done: int, results,
+                    verbose: bool = True) -> None:
+    """Hand the results so far to `callback`, every `every` pages.
+
+    Nothing a checkpoint does may end the run. Stage 2 is where the hours go, so
+    a checkpoint that cannot be written — a locked file, a full disk — has to
+    cost this checkpoint and nothing else; the next one is `every` pages away
+    and rewrites the whole file from scratch anyway.
+    """
+    if callback is None or not every or done % every:
+        return
+    try:
+        callback(list(results))
+    except Exception as e:                              # noqa: BLE001
+        if verbose:
+            print(f"      -> [CHECKPOINT] gagal menulis "
+                  f"({type(e).__name__}: {e}) — scraping dilanjutkan")
+
+
 def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
                 verbose: bool = True, follow_contact: bool = True,
-                renderer=None) -> list:
-    """Scrape a list of URLs sequentially with a delay. Returns list of ContactResult."""
+                renderer=None, on_checkpoint=None,
+                checkpoint_every: int = CHECKPOINT_EVERY) -> list:
+    """Scrape a list of URLs sequentially with a delay. Returns list of ContactResult.
+
+    `on_checkpoint`, when given, is called with the results collected so far
+    every `checkpoint_every` pages — see make_checkpoint_writer(). With the
+    default None nothing extra happens and the behaviour is exactly what it was:
+    a 2,500-page batch that dies at page 2,400 loses all of it, which is the
+    whole reason the callback exists.
+    """
     results = []
     total = len(urls)
 
@@ -1122,25 +1195,159 @@ def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
         results.append(result)
 
         if verbose:
-            if result.error:
-                print(f"      -> skipped ({result.error})")
-            elif result.total == 0:
-                print("      -> no contacts found")
-            else:
-                via = ""
-                if result.followed:
-                    paths = ", ".join(urlparse(p).path or "/" for p in result.followed)
-                    via = f" (via {paths})"
-                print(f"      -> emails={len(result.emails)} "
-                      f"whatsapp={len(result.whatsapp)} phone={len(result.phones)}{via}")
-            if result.followed and result.total == 0:
-                print(f"      -> also read {len(result.followed)} contact page(s), "
-                      "still nothing")
+            print(_result_summary(result))
+
+        _run_checkpoint(on_checkpoint, checkpoint_every, i, results, verbose)
 
         if i < total:
             time.sleep(delay)
 
     return results
+
+
+def resolve_workers(workers, renderer=None, verbose: bool = True) -> int:
+    """How many hosts may be in flight at once: 1..MAX_WORKERS.
+
+    Forced to 1 when a renderer is in play. Playwright is not thread-safe and
+    one browser cannot be shared between threads, so the alternative to
+    downgrading here is a crash somewhere in the middle of the batch.
+    """
+    try:
+        wanted = int(workers or 1)
+    except (TypeError, ValueError):
+        wanted = 1
+
+    resolved = max(1, min(wanted, MAX_WORKERS))
+    if verbose and wanted > MAX_WORKERS:
+        print(f"  --workers {wanted} diturunkan ke {MAX_WORKERS}: lebih dari itu "
+              "hampir tidak menambah kecepatan dan menaikkan risiko diblokir.")
+    if renderer is not None and resolved > 1:
+        if verbose:
+            print("  --render aktif: --workers dipaksa 1. Playwright tidak "
+                  "thread-safe dan satu browser tidak bisa dibagi antar-thread.")
+        resolved = 1
+    return resolved
+
+
+def prefetch_robots(urls, verbose: bool = True) -> int:
+    """Warm _ROBOTS_CACHE for every host, sequentially, before threads start.
+
+    robots.txt is fetched once per host either way, so doing it up front costs
+    nothing extra and leaves the parallel phase reading a cache it never has to
+    fill. Returns how many hosts had to be looked up.
+    """
+    pending = []
+    seen = set()
+    for url in urls:
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        if base in seen:
+            continue
+        seen.add(base)
+        if base not in _ROBOTS_CACHE:
+            pending.append(url)
+
+    if verbose and pending:
+        print(f"  Mengambil robots.txt untuk {len(pending)} host "
+              "sebelum paralelisasi dimulai...")
+    for url in pending:
+        is_allowed_by_robots(url)
+    return len(pending)
+
+
+def scrape_urls_parallel(urls, respect_robots: bool = True,
+                         delay: float = DEFAULT_DELAY, verbose: bool = True,
+                         follow_contact: bool = True, renderer=None,
+                         on_checkpoint=None,
+                         checkpoint_every: int = CHECKPOINT_EVERY,
+                         workers: int = 1) -> list:
+    """Fetch several hosts at once, but never one host at once with itself.
+
+    URLs are grouped by host and each worker holds one host until that host is
+    finished, so `delay` still separates two requests to the same site. Naive
+    parallelism does the opposite: five workers pulling from one queue put five
+    simultaneous requests on whichever site owns the next five URLs, which is
+    ruder than the sequential version it replaced.
+
+    Threads rather than asyncio because this is I/O-bound and asyncio would mean
+    rewriting the whole fetch layer. `workers=1` — the default — delegates
+    straight to scrape_urls(), so the sequential path is not merely equivalent
+    to what it was, it is the same code.
+
+    Results come back in the order the URLs were given, not the order they
+    finished, so two runs over the same input produce the same CSV.
+    """
+    workers = resolve_workers(workers, renderer=renderer, verbose=verbose)
+    if workers <= 1:
+        return scrape_urls(urls, respect_robots=respect_robots, delay=delay,
+                           verbose=verbose, follow_contact=follow_contact,
+                           renderer=renderer, on_checkpoint=on_checkpoint,
+                           checkpoint_every=checkpoint_every)
+
+    urls = list(urls)
+    total = len(urls)
+
+    by_host = {}
+    for index, url in enumerate(urls):
+        by_host.setdefault(site_host(url), []).append(index)
+
+    if respect_robots:
+        prefetch_robots(urls, verbose=verbose)
+
+    results = [None] * total
+    lock = threading.Lock()
+    stop = threading.Event()
+    done = 0
+
+    def run_host(indexes):
+        """One host, start to finish, on one thread."""
+        nonlocal done
+        for n, index in enumerate(indexes):
+            if stop.is_set():
+                return
+            url = urls[index]
+            if n:
+                # Same host as this thread's previous fetch — stay polite.
+                time.sleep(delay)
+
+            result = scrape_url(url, respect_robots=respect_robots,
+                                follow_contact=follow_contact, delay=delay,
+                                renderer=renderer)
+
+            # Recording, reporting and checkpointing all happen under one lock:
+            # interleaved half-lines are unreadable, and two threads writing the
+            # checkpoint file at the same time would corrupt it.
+            with lock:
+                results[index] = result
+                done += 1
+                if verbose:
+                    print(f"  [{done}/{total}] {url}\n{_result_summary(result)}")
+                _run_checkpoint(on_checkpoint, checkpoint_every, done,
+                                [r for r in results if r is not None], verbose)
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = [pool.submit(run_host, indexes) for indexes in by_host.values()]
+    try:
+        for future in futures:
+            # Re-raise anything a worker hid, rather than returning a list with
+            # silent holes in it.
+            future.result()
+    except BaseException:
+        # Ctrl-C has to actually stop the run. Left to `with
+        # ThreadPoolExecutor(...)`, the exception would propagate into a
+        # shutdown(wait=True) that first works through every host still queued —
+        # on a 187-host batch that reads as a hang, and the whole point of the
+        # checkpoint file is that an interrupted run ends promptly with its
+        # results on disk. Cancel what has not started, tell the running threads
+        # to stop after the fetch in flight, and re-raise.
+        stop.set()
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False)
+        raise
+    pool.shutdown(wait=True)
+
+    return [r for r in results if r is not None]
 
 
 FIELDNAMES = [
@@ -1270,6 +1477,9 @@ def write_csv(rows: list, output_path: str) -> str:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)
+            # Emails and WhatsApp numbers are personal data under UU PDP, and
+            # the default umask would leave them world-readable.
+            secure_file(candidate)
             return candidate
         except OSError as e:
             if candidate == output_path:
@@ -1293,6 +1503,86 @@ def _output_candidates(output_path: str, limit: int = 20):
         yield f"{stem}-{n}{ext}"
 
 
+# ------------------------------------------------------- checkpoint files
+
+def partial_path(output_path: str) -> str:
+    """`contacts.csv` -> `contacts.partial.csv`."""
+    stem, ext = os.path.splitext(output_path)
+    return f"{stem}{PARTIAL_SUFFIX}{ext or '.csv'}"
+
+
+def find_partials(output_path: str) -> list:
+    """Checkpoint files sitting on disk for this output path.
+
+    The numbered siblings count too: write_csv() routes around a locked file, so
+    a checkpoint written while Excel held `contacts.partial.csv` open lives at
+    `contacts.partial-2.csv`.
+    """
+    return [path for path in _output_candidates(partial_path(output_path))
+            if os.path.exists(path)]
+
+
+def partial_row_count(path: str) -> int:
+    """Data rows in a checkpoint file, or 0 if it cannot be read."""
+    try:
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            return max(0, sum(1 for _ in csv.reader(f)) - 1)
+    except OSError:
+        return 0
+
+
+def announce_partial(output_path: str) -> list:
+    """Say so when a previous run left results behind. Returns the paths found.
+
+    Worth a line at startup rather than silence: the file is the only trace an
+    interrupted run leaves, and this run is about to overwrite it.
+    """
+    partials = find_partials(output_path)
+    for path in partials:
+        print(f"Ditemukan hasil parsial dari run sebelumnya: {path} "
+              f"({partial_row_count(path)} baris)")
+    if partials:
+        print("  Run ini menimpanya, lalu menghapusnya setelah file final "
+              "berhasil ditulis.")
+    return partials
+
+
+def remove_partial(output_path: str) -> None:
+    """Delete the checkpoint file(s) once the final CSV is safely on disk."""
+    for path in find_partials(output_path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def make_checkpoint_writer(output_path: str, extra_by_url: dict = None,
+                           guess_email: bool = False, verbose: bool = True):
+    """Build the `on_checkpoint` callback: results so far -> <output>.partial.csv.
+
+    The whole file is rewritten each time rather than appended to, because
+    results_to_rows() dedups and groups by host across every result it is given
+    — three pages of one site are one row, and appending row by row would break
+    both the grouping and the dedup.
+
+    The checkpoint is a recovery artifact, not the deliverable: the row filters
+    (--emails-only, --high-confidence-only) are applied to the final CSV only,
+    so a partial holds everything found so far and nothing has been dropped
+    from it.
+    """
+    target = partial_path(output_path)
+
+    def write_checkpoint(results):
+        rows = results_to_rows(results, extra_by_url=extra_by_url,
+                               guess_email=guess_email)
+        written = write_csv(rows, target)
+        if verbose:
+            print(f"      -> [CHECKPOINT] {len(rows)} baris disimpan "
+                  f"ke '{written}'")
+
+    return write_checkpoint
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
@@ -1303,6 +1593,14 @@ def main():
     parser.add_argument("-o", "--output", default="contacts.csv", help="Output CSV path")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY,
                         help=f"Seconds between requests (default: {DEFAULT_DELAY})")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help=f"Fetch N hosts at once, max {MAX_WORKERS} "
+                             "(default: 1, sequential). One host is never "
+                             "fetched in parallel with itself")
+    parser.add_argument("--checkpoint-every", type=int, default=CHECKPOINT_EVERY,
+                        metavar="N",
+                        help="Save results so far to <output>.partial.csv every "
+                             f"N pages (default: {CHECKPOINT_EVERY}, 0 = off)")
     parser.add_argument("--ignore-robots", action="store_true",
                         help="Skip robots.txt checking (not recommended)")
     parser.add_argument("--emails-only", action="store_true",
@@ -1332,8 +1630,19 @@ def main():
         sys.exit(1)
 
     print(f"Loaded {len(urls)} URL(s).\n")
-    results = scrape_urls(urls, respect_robots=not args.ignore_robots, delay=args.delay,
-                          follow_contact=not args.no_follow_contact)
+    announce_partial(args.output)
+
+    on_checkpoint = None
+    if args.checkpoint_every:
+        on_checkpoint = make_checkpoint_writer(args.output,
+                                               guess_email=args.guess_email)
+
+    results = scrape_urls_parallel(urls, respect_robots=not args.ignore_robots,
+                                   delay=args.delay,
+                                   follow_contact=not args.no_follow_contact,
+                                   on_checkpoint=on_checkpoint,
+                                   checkpoint_every=args.checkpoint_every,
+                                   workers=args.workers)
     rows = results_to_rows(results, guess_email=args.guess_email)
 
     if args.ignore_free_mail:
@@ -1352,6 +1661,10 @@ def main():
                 row["email_source"] = ""
 
     written = write_csv(rows, args.output)
+    # Superseded by the file just written — but only if this run produced
+    # something. An empty run has nothing to supersede.
+    if rows:
+        remove_partial(args.output)
     print(f"\nDone. {len(rows)} company/companies -> '{written}'")
 
 

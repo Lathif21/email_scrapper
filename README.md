@@ -350,12 +350,91 @@ explicitly stating the number is reachable.
 --cache                   # reuse previous search results across runs
 ```
 
+**Long runs** — see the section below
+```bash
+--workers 4               # fetch 4 hosts at once (default 1, max 5)
+--checkpoint-every 50     # save progress every 50 pages (default 25, 0 = off)
+```
+
 **Output**
 ```bash
 -o contacts.csv           # output path
 --encrypt                 # encrypt and delete the plaintext
 --high-confidence-only    # drop low-confidence phone rows
 ```
+
+---
+
+## Long runs: checkpoints and parallel fetching
+
+Stage 2 is where a batch spends its time — a 2,500-page run takes about 2.4
+hours sequentially — so it is also where an interrupted run hurts most.
+
+### `--checkpoint-every N` — progress survives an interruption
+
+Every N pages (default **25**) the results so far are written to
+`<output>.partial.csv`. If the run dies — Ctrl-C, power cut, dropped
+connection, VPS restart — that file is left behind on purpose:
+
+```bash
+python main.py queries.txt --batch -o kontak.csv
+# ...interrupted at page 142...
+
+ls kontak*
+# kontak.partial.csv        <- 125 companies, still there
+```
+
+The next run says so at startup:
+
+```
+Ditemukan hasil parsial dari run sebelumnya: kontak.partial.csv (125 baris)
+  Run ini menimpanya, lalu menghapusnya setelah file final berhasil ditulis.
+```
+
+Once the final CSV is written the partial is deleted. A run that produced **no**
+rows leaves it alone, so an empty re-run cannot throw away the last thing you
+recovered.
+
+Notes worth knowing:
+
+- The whole file is rewritten each time rather than appended to, because rows
+  are grouped and deduplicated by host across every result. Three pages of one
+  site are one row in the partial exactly as in the final CSV.
+- The row filters (`--emails-only`, `--high-confidence-only`) apply to the final
+  CSV only. A partial holds everything found so far.
+- A failed checkpoint — locked file, full disk — is reported and the scrape
+  carries on. It never costs you the run.
+- `--checkpoint-every 0` turns it off.
+- `--skip-scraped` is unaffected: an interrupted run records nothing to the
+  state DB, so a re-run fetches those URLs again rather than skipping them.
+
+### `--workers N` — several hosts at once
+
+Off by default (`--workers 1` is the sequential path, unchanged). Raising it
+groups the URLs by host and fetches **several hosts in parallel while keeping
+one host strictly sequential**, with `--scrape-delay` still applied between two
+pages of the same site:
+
+```bash
+python main.py urls.txt --skip-search --workers 4 -o kontak.csv
+```
+
+```
+[STAGE 2/3] Contact extraction
+  Paralel: 4 worker, 187 host (satu host tetap berurutan, dengan --scrape-delay di antaranya)
+```
+
+Measured on 40 pages across 8 hosts at 0.25 s per fetch: 10.0 s at
+`--workers 1`, 2.5 s at `--workers 4` — **4x**, with identical output.
+
+- Capped at **5**. Beyond that the extra hosts in flight buy very little and the
+  odds of being blocked go up.
+- `robots.txt` is still checked before every fetch. It is fetched once per host
+  up front, before the threads start, so the cache is never contended.
+- Results come back in input order, not completion order, so two runs over the
+  same URL list produce the same CSV.
+- **`--render` forces `--workers 1`.** Playwright is not thread-safe and one
+  browser cannot be shared between threads. You get a warning, not a crash.
 
 ---
 

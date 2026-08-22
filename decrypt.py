@@ -30,6 +30,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from secure_files import secure_file
 from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, SALT_SIZE, derive_key,
                      managed_path, resolve_password, warn_if_replacing)
 
@@ -108,6 +109,8 @@ def decrypt_file(input_path: str, output_path: str, password: str) -> str:
 
     with open(output_path, "wb") as f:
         f.write(data)
+    # Recovered plaintext is exactly as sensitive as the original CSV.
+    secure_file(output_path)
 
     return output_path
 
@@ -206,6 +209,7 @@ def main():
 
     with open(output_path, "wb") as f:
         f.write(data)
+    secure_file(output_path)
     print(f"Decrypted -> '{output_path}'")
 
 

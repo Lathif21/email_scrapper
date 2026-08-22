@@ -45,6 +45,8 @@ from typing import Optional
 
 import requests
 
+from secure_files import secure_file
+
 try:
     from dotenv import load_dotenv
     load_dotenv()  # reads .env into os.environ, if present
@@ -141,6 +143,8 @@ class SerperSearch:
         try:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f, indent=2, ensure_ascii=False)
+            # Cached SERPs carry result URLs and snippets in plaintext.
+            secure_file(self.cache_file)
         except Exception as e:
             print(f"[CACHE] Warning: couldn't save cache: {e}")
 

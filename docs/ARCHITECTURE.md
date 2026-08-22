@@ -12,12 +12,14 @@ the only file that knows about all of them; nothing else imports `main`.
 ```
 main.py
   ├── google_search_scrapper.SearchScraper.search_many()  -> [result dicts]
-  ├── email_parser.scrape_urls()                          -> [ContactResult]
+  ├── email_parser.scrape_urls_parallel()                 -> [ContactResult]
   ├── email_parser.results_to_rows() / write_csv()        -> CSV
   └── encrypt.encrypt_file()                              -> .enc
 
 decrypt.py
   └── encrypt.derive_key(), encrypt.SALT_SIZE            (shared KDF)
+
+secure_files.py   (imported by all of the above; imports only `os`)
 ```
 
 **Dependency direction is one-way.** `decrypt.py` imports from `encrypt.py`,
@@ -415,3 +417,106 @@ actually encrypted.
 Only the lock is worked around. If every candidate fails the last error is
 raised, because an unwritable directory is a real problem the caller has to see
 rather than a name collision to route around.
+
+
+---
+
+## Nothing is lost when a run dies (Task 07)
+
+Stage 2 is where the hours go — roughly 2.4 hours for 2,500 pages — and it used
+to hold every `ContactResult` in memory until the last page finished. A run
+killed at page 2,400 wrote no file at all. Ctrl-C, a dropped connection, a power
+cut or a VPS restart cost the whole batch, and the search credits with it. The
+principle was already in the codebase: Task 05 saves search state per page
+rather than per run, for exactly this reason. It just had not reached stage 2.
+
+`scrape_urls()` now takes `on_checkpoint`, called every `--checkpoint-every`
+pages (default 25) with the results so far. `main.py` supplies a callback that
+writes `<output>.partial.csv`, and stage 3 deletes it once the final file is
+safely written.
+
+**Checkpoints, not append-per-row.** `results_to_rows()` deduplicates and groups
+by host across the entire result set, so an appended row cannot know that a
+later page belongs to the same company. Each checkpoint rewrites the whole file
+from the results so far, which keeps the grouping and the dedup exactly as
+correct as in the final CSV. Rewriting 25 pages' worth of rows costs
+milliseconds against the ~50 seconds of fetching it covers.
+
+**A checkpoint may never end the run.** The call is wrapped: a locked file or a
+full disk is reported and the scrape continues. The alternative — losing 2,400
+pages because the recovery mechanism failed — inverts the entire point.
+
+**An empty run does not clean up.** The partial is deleted after a successful
+final write only when that write had rows in it. A re-run that finds nothing has
+nothing to supersede, and the file it would delete may be the only copy of an
+earlier interrupted run's results.
+
+**`--skip-scraped` needed no change, and that is load-bearing.**
+`record_scraped()` runs *after* the `scrape_urls()` loop, so an interrupted run
+records nothing and a re-run re-fetches those URLs. Moving `record_scraped()`
+into the loop without care would create the one genuinely unrecoverable bug
+available here: a URL marked `ok` whose contacts died with the run is skipped
+forever afterwards. If it ever moves, it can only be recorded after the
+checkpoint containing that URL's result has been written.
+
+---
+
+## Per-host queues, not naive parallelism (Task 07)
+
+`--workers N` (default 1, capped at 5) fetches several hosts at once. URLs are
+grouped by `site_host()`, one thread holds one host until that host is finished,
+and `--scrape-delay` still separates two pages of the same site.
+
+The obvious implementation is the wrong one. Five workers pulling from one URL
+queue put five simultaneous requests on whichever site owns the next five
+URLs — ruder than the sequential version it replaced, and a fast route to being
+blocked. Grouping by host makes the parallelism happen between sites, where it
+costs nobody anything, and keeps it out of the one place it would be rude.
+
+Threads, not `asyncio`: this is I/O-bound, so threads are sufficient, and
+asyncio would mean rewriting the entire fetch layer for no additional benefit.
+
+**`robots.txt` is fetched for every host up front, sequentially,** before the
+pool starts. That is simpler than making `_ROBOTS_CACHE` safe to fill
+concurrently and costs nothing — the file is fetched once per host either way.
+A lock guards the cache as well, so correctness does not depend on the prefetch
+having covered every base a followed contact link might reach.
+
+**`--render` forces `--workers 1`.** Playwright is not thread-safe and one
+browser instance cannot be shared between threads. Downgrading with a warning
+beats crashing in the middle of a batch.
+
+**Results come back in input order**, collected into a pre-sized list by index
+rather than appended as they finish. Otherwise the CSV row order would vary
+between runs of the same input and no test of stage 2 could be stable.
+
+Measured on 40 pages over 8 hosts at 0.25 s per fetch: 10.0 s at `--workers 1`,
+2.5 s at `--workers 4`. With a fast mocked fetch the speedup is much smaller,
+because BeautifulSoup parsing is CPU-bound and the GIL serializes it — real
+fetches are 1.5 s against ~10 ms of parsing, so in practice the scaling holds.
+
+---
+
+## Collected data is owner-only (Task 07)
+
+`secure_files.py` sets mode `0o600` on every file holding collected data and
+`0o700` on the managed directories: the output CSV, the `.partial.csv`
+checkpoints, `.enc` files, files recovered by `decrypt.py`, `.search_state.db`,
+and the search caches. Written with the default umask these were `644` —
+world-readable — which on a shared VPS means every account on the box could read
+the emails and WhatsApp numbers. `COMPLIANCE.md` already required protection at
+rest; `--encrypt` provided it and the plaintext default did not.
+
+**Its own module rather than a helper in `email_parser`.** Six modules need it
+and one of them is `decrypt.py`, whose only local import is `encrypt.py` — that
+one-way dependency is what lets a dashboard call `load_encrypted_csv()` while
+pulling in `cryptography` and nothing else. Routing a four-line `chmod` through
+`email_parser` would drag `requests` and BeautifulSoup into that path and into
+`search_state.py`, which is deliberately stdlib-only. `secure_files` imports
+`os` and nothing else, so any module can use it without acquiring a dependency.
+
+**Both helpers fail silently.** Windows has no POSIX mode bits and `os.chmod`
+there can only toggle the read-only flag, so raising would mean an exception on
+every write on the platform this project is mostly run on. The limitation is
+documented in `COMPLIANCE.md` instead, where a Windows user can read that
+`--encrypt` is their only real protection.

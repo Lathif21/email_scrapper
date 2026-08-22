@@ -34,6 +34,8 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 
+from secure_files import secure_file
+
 
 DEFAULT_STATE_DB = ".search_state.db"
 
@@ -81,9 +83,13 @@ def _now() -> str:
 
 
 def _connect(db_path: str):
-    conn = sqlite3.connect(db_path or DEFAULT_STATE_DB)
+    path = db_path or DEFAULT_STATE_DB
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # The DB holds every URL each query returned and everything stage 2
+    # fetched — a full record of who was researched.
+    secure_file(path)
     return conn
 
 

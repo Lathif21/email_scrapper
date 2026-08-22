@@ -32,12 +32,14 @@ Kerjakan berurutan. Setiap task punya syarat masuk dan kriteria selesai yang jel
 | 04 | [`04_audit_and_extraction.md`](04_audit_and_extraction.md) | SELESAI (`02f67e3`) | Rp 0 |
 | 05 | [`05_resumable_search.md`](05_resumable_search.md) | SELESAI (`81cf1bb`) | Rp 0 |
 | 06 | [`06_playwright_render.md`](06_playwright_render.md) | SELESAI — tapi terpicu 0% | Rp 0 (dependensi opsional) |
+| 07 | [`07_reliabilitas_output.md`](07_reliabilitas_output.md) | SELESAI | Rp 0 |
+| 08 | [`08_restrukturisasi.md`](08_restrukturisasi.md) | belum dikerjakan | Rp 0 |
 
 Di luar task: satu commit perbaikan (`008a09f`) menangani deteksi halaman
 bot-check, pembacaan JSON-LD dan `tel:`, serta kegagalan senyap saat `--encrypt`
 tidak bisa menghapus plaintext.
 
-**216 test lolos.** Jalankan:
+**299 test lolos** (2 dilewati di Windows). Jalankan:
 
 ```bash
 python -m unittest test_email_parser test_serper_search test_query_tools test_search_state
@@ -164,13 +166,16 @@ docs/
   03_QUERY_quality.md      <- SELESAI
   04_audit_and_extraction.md <- SELESAI
   05_resumable_search.md   <- SELESAI
-  06_playwright_render.md  <- belum dikerjakan
+  06_playwright_render.md  <- SELESAI
+  07_reliabilitas_output.md <- SELESAI
+  08_restrukturisasi.md    <- belum dikerjakan
 archive/
   README.md                <- daftar file mati + alasannya
 main.py                    <- orkestrasi 3 tahap
 serper_search.py           <- stage 1 (default)
 google_search_scrapper.py  <- stage 1 fallback, hasilnya salah
 email_parser.py            <- stage 2
+secure_files.py            <- chmod 0600/0700 untuk semua file berisi data kontak
 query_tools.py             <- blocklist, operator negatif, fan-out
 search_state.py            <- state resume (SQLite)
 audit_output.py            <- ukur kualitas CSV

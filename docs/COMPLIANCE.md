@@ -136,6 +136,31 @@ The encryption in this pipeline covers data at rest. The rest is process:
 - Note that `--cache` writes `.search_cache.json` in **plaintext**, including
   result URLs and snippets; delete it when done or add it to `.gitignore`
 
+### File permissions
+
+Every file the pipeline writes that holds collected data is set to mode `600` —
+readable and writable by its owner and by nobody else. Written with the default
+umask these land as `644`, which on a shared VPS or any multi-user machine means
+every other account on the box can read the emails and WhatsApp numbers.
+
+Covered: the output CSV, the `<output>.partial.csv` checkpoints, `.enc` files,
+files recovered by `decrypt.py`, `.search_state.db`, and the search caches. The
+managed directories (`output/`, `output/encrypted/`, `output/decrypted/`) are set
+to `700`, so their contents cannot even be listed by another user.
+
+```bash
+stat -c '%a %n' kontak.csv output/encrypted
+# 600 kontak.csv
+# 700 output/encrypted
+```
+
+> **Windows users: this protection does not apply to you.** Windows has no POSIX
+> mode bits, and `os.chmod` there can only toggle the read-only flag — it cannot
+> stop another account from reading the file. The call is made and fails
+> silently, by design, so nothing crashes. On Windows **`--encrypt` is your only
+> real protection for data at rest**; use it, and treat an unencrypted CSV on a
+> shared machine as readable by anyone with an account on it.
+
 Suggested `.gitignore`:
 
 ```

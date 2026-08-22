@@ -378,13 +378,33 @@ def stage_parse(pairs: list, args) -> list:
             sys.exit(1)
         print("  Render fallback aktif (browser dibuka sekali untuk batch ini)")
 
+    # Built before scraping starts, not after: the checkpoint files need the
+    # originating query too, or a recovered partial loses the column that says
+    # which search found each contact.
+    extra_by_url = {url: {"search_query": query_by_url.get(url, "")} for url in urls}
+
+    on_checkpoint = None
+    if args.checkpoint_every:
+        on_checkpoint = email_parser.make_checkpoint_writer(
+            args.output, extra_by_url=extra_by_url,
+            guess_email=args.guess_email)
+
+    workers = email_parser.resolve_workers(args.workers, renderer=renderer)
+    if workers > 1:
+        hosts = len({email_parser.site_host(u) for u in urls})
+        print(f"  Paralel: {workers} worker, {hosts} host "
+              "(satu host tetap berurutan, dengan --scrape-delay di antaranya)")
+
     try:
-        results = email_parser.scrape_urls(
+        results = email_parser.scrape_urls_parallel(
             urls,
             respect_robots=not args.ignore_robots,
             delay=args.scrape_delay,
             follow_contact=not args.no_follow_contact,
             renderer=renderer,
+            on_checkpoint=on_checkpoint,
+            checkpoint_every=args.checkpoint_every,
+            workers=workers,
         )
     finally:
         # Closed even on Ctrl-C, so no Chromium is left running.
@@ -400,7 +420,6 @@ def stage_parse(pairs: list, args) -> list:
             search_state.classify_scrape_status(result.error),
             result.total)
 
-    extra_by_url = {url: {"search_query": query_by_url.get(url, "")} for url in urls}
     rows = email_parser.results_to_rows(
         results,
         extra_by_url=extra_by_url,
@@ -462,6 +481,13 @@ def stage_output(rows: list, args) -> None:
     print(f"Wrote {len(rows)} row(s) -> '{written}'")
     if written != args.output:
         print(f"         (bukan '{args.output}' — file itu terkunci)")
+
+    # The checkpoint file exists to survive an interrupted run, and the final
+    # write has just superseded it. Not removed after an empty run: a run that
+    # produced no rows has nothing to supersede, and the partial it would delete
+    # may be the only copy of an earlier interrupted run's results.
+    if rows:
+        email_parser.remove_partial(args.output)
 
     if not args.encrypt:
         print("\nNOTE: output is plaintext. Use --encrypt to protect it at rest.")
@@ -572,6 +598,12 @@ def main():
     # --- parse options ---
     parser.add_argument("--scrape-delay", type=float, default=2,
                         help="Seconds between page fetches (default: 2)")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help=f"Fetch N hosts at once, max "
+                             f"{email_parser.MAX_WORKERS} (default: 1, "
+                             "sequential). One host is never fetched in "
+                             "parallel with itself, and --scrape-delay still "
+                             "applies within a host")
     parser.add_argument("--ignore-robots", action="store_true",
                         help="Skip robots.txt checking (not recommended)")
     parser.add_argument("--emails-only", action="store_true",
@@ -589,6 +621,12 @@ def main():
     # --- output options ---
     parser.add_argument("-o", "--output", default="contacts.csv",
                         help="Output CSV path (default: contacts.csv)")
+    parser.add_argument("--checkpoint-every", type=int,
+                        default=email_parser.CHECKPOINT_EVERY, metavar="N",
+                        help="Save results so far to <output>.partial.csv every "
+                             "N pages, so an interrupted run keeps what it "
+                             f"found (default: {email_parser.CHECKPOINT_EVERY}, "
+                             "0 = off)")
     parser.add_argument("--encrypt", action="store_true",
                         help="Encrypt the output and delete the plaintext")
     parser.add_argument("--password", default=None,
@@ -617,6 +655,7 @@ def main():
         sys.exit(1)
 
     print(BANNER)
+    email_parser.announce_partial(args.output)
     started = time.time()
 
     # Stage 1

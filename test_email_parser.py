@@ -17,13 +17,17 @@ import csv
 import io
 import os
 import shutil
+import stat
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
 import requests
 
 import email_parser
+import secure_files
 from email_parser import (
     ContactResult,
     clean_emails,
@@ -1087,6 +1091,322 @@ class PhoneRegressionTests(unittest.TestCase):
         for raw in ("0812-3456-7890", "+62 812 3456 7890", "62812 3456 7890"):
             with self.subTest(raw=raw):
                 self.assertTrue(PHONE_REGEX.findall(raw), raw)
+
+
+# ------------------------------------------------- Task 07: checkpoint files
+
+class CheckpointTests(unittest.TestCase):
+    """A run that dies must not take its results with it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.output = os.path.join(self.dir, "kontak.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @staticmethod
+    def _urls(n):
+        return [f"https://situs{i}.co.id/" for i in range(n)]
+
+    @staticmethod
+    def _fetch(url, timeout=10):
+        host = email_parser.site_host(url)
+        return f'<html><body><a href="mailto:info@{host}">Email</a></body></html>', None
+
+    def _scrape(self, urls, **kwargs):
+        with mock.patch.object(email_parser, "_fetch_page", self._fetch):
+            return email_parser.scrape_urls(urls, respect_robots=False, delay=0,
+                                            verbose=False, **kwargs)
+
+    def _partial_rows(self):
+        with io.open(email_parser.partial_path(self.output),
+                     encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+
+    def test_no_callback_leaves_behaviour_unchanged(self):
+        results = self._scrape(self._urls(3))
+        self.assertEqual([r.url for r in results], self._urls(3))
+        self.assertEqual(email_parser.find_partials(self.output), [])
+
+    def test_the_callback_fires_once_per_n_pages(self):
+        seen = []
+        self._scrape(self._urls(50), on_checkpoint=lambda r: seen.append(len(r)),
+                     checkpoint_every=25)
+        self.assertEqual(seen, [25, 50])
+
+    def test_checkpointing_can_be_switched_off(self):
+        seen = []
+        self._scrape(self._urls(50), on_checkpoint=lambda r: seen.append(len(r)),
+                     checkpoint_every=0)
+        self.assertEqual(seen, [])
+
+    def test_an_interrupted_run_leaves_its_results_on_disk(self):
+        """The whole point: 30 pages in, Ctrl-C, and 25 of them survive."""
+        writer = email_parser.make_checkpoint_writer(self.output, verbose=False)
+        seen = {"n": 0}
+
+        def dies_at_31(url, timeout=10):
+            seen["n"] += 1
+            if seen["n"] > 30:
+                raise KeyboardInterrupt
+            return self._fetch(url)
+
+        with mock.patch.object(email_parser, "_fetch_page", dies_at_31):
+            with self.assertRaises(KeyboardInterrupt):
+                email_parser.scrape_urls(self._urls(50), respect_robots=False,
+                                         delay=0, verbose=False,
+                                         on_checkpoint=writer,
+                                         checkpoint_every=25)
+
+        self.assertTrue(os.path.exists(email_parser.partial_path(self.output)))
+        self.assertGreaterEqual(len(self._partial_rows()), 25)
+
+    def test_a_finished_run_cleans_up_its_checkpoint(self):
+        writer = email_parser.make_checkpoint_writer(self.output, verbose=False)
+        self._scrape(self._urls(25), on_checkpoint=writer, checkpoint_every=25)
+        self.assertTrue(email_parser.find_partials(self.output))
+
+        email_parser.write_csv([], self.output)
+        email_parser.remove_partial(self.output)
+        self.assertEqual(email_parser.find_partials(self.output), [])
+
+    def test_a_failed_checkpoint_never_stops_the_scrape(self):
+        def explode(results):
+            raise OSError(13, "Permission denied")
+
+        results = self._scrape(self._urls(50), on_checkpoint=explode,
+                               checkpoint_every=25)
+        self.assertEqual(len(results), 50)
+
+    def test_dedup_and_grouping_survive_inside_a_checkpoint(self):
+        """Two pages of one host are one row in the partial, as in the final CSV."""
+        urls = ["https://satu.co.id/a", "https://satu.co.id/b",
+                "https://dua.co.id/a", "https://dua.co.id/b"]
+        writer = email_parser.make_checkpoint_writer(self.output, verbose=False)
+        self._scrape(urls, on_checkpoint=writer, checkpoint_every=4)
+        self.assertEqual(len(self._partial_rows()), 2)
+
+    def test_the_partial_carries_the_originating_query(self):
+        extra = {"https://situs0.co.id/": {"search_query": "hotel bali kontak"}}
+        writer = email_parser.make_checkpoint_writer(self.output, extra_by_url=extra,
+                                                     verbose=False)
+        self._scrape(self._urls(1), on_checkpoint=writer, checkpoint_every=1)
+        self.assertEqual(self._partial_rows()[0]["search_query"],
+                         "hotel bali kontak")
+
+    def test_a_leftover_partial_is_announced_not_ignored(self):
+        writer = email_parser.make_checkpoint_writer(self.output, verbose=False)
+        self._scrape(self._urls(2), on_checkpoint=writer, checkpoint_every=2)
+
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            found = email_parser.announce_partial(self.output)
+        self.assertEqual(found, [email_parser.partial_path(self.output)])
+        self.assertIn("hasil parsial", buf.getvalue())
+        self.assertIn("2 baris", buf.getvalue())
+
+    def test_nothing_is_announced_when_no_partial_exists(self):
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            self.assertEqual(email_parser.announce_partial(self.output), [])
+        self.assertEqual(buf.getvalue(), "")
+
+
+# ------------------------------------------------ Task 07: file permissions
+
+class SecureFileTests(unittest.TestCase):
+    """Contact data must not be readable by every account on the machine."""
+
+    ROWS = [{"company": "PT Maju Jaya", "email": "sales@maju.co.id"}]
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.target = os.path.join(self.dir, "kontak.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_write_csv_restricts_the_file_it_wrote(self):
+        with mock.patch("secure_files.os.chmod") as chmod:
+            written = email_parser.write_csv(self.ROWS, self.target)
+        chmod.assert_any_call(written, secure_files.FILE_MODE)
+
+    def test_a_checkpoint_file_is_restricted_too(self):
+        writer = email_parser.make_checkpoint_writer(self.target, verbose=False)
+        with mock.patch("secure_files.os.chmod") as chmod:
+            writer([ContactResult(url="https://maju.co.id/",
+                                  emails={"sales@maju.co.id"})])
+        chmod.assert_any_call(email_parser.partial_path(self.target),
+                              secure_files.FILE_MODE)
+
+    def test_a_refused_chmod_is_not_an_error(self):
+        """Windows chmod is mostly a no-op, so failure has to be survivable."""
+        with mock.patch("secure_files.os.chmod",
+                        side_effect=OSError(1, "Operation not permitted")):
+            secure_files.secure_file(self.target)
+            secure_files.secure_dir(self.dir)
+            written = email_parser.write_csv(self.ROWS, self.target)
+        self.assertEqual(written, self.target)
+        self.assertTrue(os.path.exists(written))
+
+    @unittest.skipIf(os.name == "nt", "Windows tidak punya mode bit POSIX")
+    def test_the_output_csv_is_owner_only_on_posix(self):
+        written = email_parser.write_csv(self.ROWS, self.target)
+        self.assertEqual(stat.S_IMODE(os.stat(written).st_mode), 0o600)
+
+
+# --------------------------------------------- Task 07: per-host parallelism
+
+class ParallelScrapeTests(unittest.TestCase):
+    """Several hosts at once, but one host still one request at a time."""
+
+    HOSTS = ("satu.co.id", "dua.co.id", "tiga.co.id")
+
+    def setUp(self):
+        self.urls = [f"https://{host}/hal{n}"
+                     for host in self.HOSTS for n in range(4)]
+        self.lock = threading.Lock()
+        self.active = {}
+        self.peak_per_host = {}
+        self.peak_total = 0
+
+    @staticmethod
+    def _body(host):
+        return f'<html><body><a href="mailto:info@{host}">Email</a></body></html>'
+
+    def _plain_fetch(self, url, timeout=10):
+        return self._body(email_parser.site_host(url)), None
+
+    def _tracking_fetch(self, url, timeout=10):
+        """Records how many requests are in flight, per host and overall."""
+        host = email_parser.site_host(url)
+        with self.lock:
+            self.active[host] = self.active.get(host, 0) + 1
+            self.peak_per_host[host] = max(self.peak_per_host.get(host, 0),
+                                           self.active[host])
+            self.peak_total = max(self.peak_total, sum(self.active.values()))
+        time.sleep(0.03)
+        with self.lock:
+            self.active[host] -= 1
+        return self._body(host), None
+
+    def test_one_worker_matches_the_sequential_path(self):
+        with mock.patch.object(email_parser, "_fetch_page", self._plain_fetch):
+            sequential = email_parser.scrape_urls(
+                self.urls, respect_robots=False, delay=0, verbose=False)
+            parallel = email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                workers=1)
+        self.assertEqual([r.url for r in parallel], [r.url for r in sequential])
+        self.assertEqual(results_to_rows(parallel), results_to_rows(sequential))
+
+    def test_one_host_is_never_fetched_twice_at_once(self):
+        with mock.patch.object(email_parser, "_fetch_page", self._tracking_fetch):
+            results = email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                workers=4)
+        self.assertEqual(len(results), len(self.urls))
+        self.assertEqual(set(self.peak_per_host.values()), {1})
+        # And the hosts really were overlapping — otherwise the test above
+        # would pass just as well on the sequential path.
+        self.assertGreaterEqual(self.peak_total, 2)
+
+    def test_the_delay_still_separates_two_pages_of_one_host(self):
+        slept = []
+        with mock.patch.object(email_parser, "_fetch_page", self._plain_fetch):
+            with mock.patch.object(email_parser.time, "sleep", slept.append):
+                email_parser.scrape_urls_parallel(
+                    self.urls, respect_robots=False, delay=1.5, verbose=False,
+                    workers=3)
+        # Four pages per host means three gaps per host, and nothing waits
+        # between one host and another.
+        self.assertEqual(len(slept), 3 * len(self.HOSTS))
+        self.assertEqual(set(slept), {1.5})
+
+    def test_result_order_is_deterministic(self):
+        with mock.patch.object(email_parser, "_fetch_page", self._tracking_fetch):
+            first = email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                workers=4)
+            second = email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                workers=4)
+        self.assertEqual([r.url for r in first], self.urls)
+        self.assertEqual([r.url for r in second], self.urls)
+
+    def test_checkpoints_still_fire_in_parallel_mode(self):
+        seen = []
+        with mock.patch.object(email_parser, "_fetch_page", self._plain_fetch):
+            email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                workers=4, on_checkpoint=lambda r: seen.append(len(r)),
+                checkpoint_every=4)
+        self.assertEqual(seen, [4, 8, 12])
+
+    def test_workers_above_the_ceiling_are_clamped(self):
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            resolved = email_parser.resolve_workers(20)
+        self.assertEqual(resolved, email_parser.MAX_WORKERS)
+        self.assertIn("diturunkan", buf.getvalue())
+
+    def test_render_forces_a_single_worker_with_a_warning(self):
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            resolved = email_parser.resolve_workers(4, renderer=object())
+        self.assertEqual(resolved, 1)
+        self.assertIn("--render", buf.getvalue())
+        self.assertIn("thread-safe", buf.getvalue())
+
+    def test_render_and_four_workers_runs_sequentially(self):
+        with mock.patch.object(email_parser, "_fetch_page", self._tracking_fetch):
+            results = email_parser.scrape_urls_parallel(
+                self.urls, respect_robots=False, delay=0, verbose=False,
+                renderer=object(), workers=4)
+        self.assertEqual([r.url for r in results], self.urls)
+        self.assertEqual(self.peak_total, 1)
+
+    def test_an_interrupt_stops_the_pool_instead_of_draining_it(self):
+        """Ctrl-C must not have to work through every host still queued."""
+        many = [f"https://situs{i}.co.id/" for i in range(60)]
+        seen = {"n": 0}
+
+        def dies_on_the_third_fetch(url, timeout=10):
+            seen["n"] += 1
+            if seen["n"] == 3:
+                raise KeyboardInterrupt
+            time.sleep(0.05)
+            return self._body(email_parser.site_host(url)), None
+
+        with mock.patch.object(email_parser, "_fetch_page",
+                               dies_on_the_third_fetch):
+            with self.assertRaises(KeyboardInterrupt):
+                email_parser.scrape_urls_parallel(
+                    many, respect_robots=False, delay=0, verbose=False,
+                    workers=4)
+
+        # Only the fetches already in flight are allowed to finish; draining all
+        # 60 queued hosts would show up here as a much larger number.
+        self.assertLess(seen["n"], 20)
+
+    def test_robots_is_warmed_once_per_host_before_the_threads_start(self):
+        email_parser._ROBOTS_CACHE.clear()
+        self.addCleanup(email_parser._ROBOTS_CACHE.clear)
+        asked = []
+
+        def fake_get(url, **kwargs):
+            asked.append(url)
+            return FakeResponse(status_code=404, text="")
+
+        with mock.patch.object(email_parser.requests, "get", fake_get):
+            warmed = email_parser.prefetch_robots(self.urls, verbose=False)
+
+        self.assertEqual(warmed, len(self.HOSTS))
+        self.assertEqual(asked, [f"https://{h}/robots.txt" for h in self.HOSTS])
+        # Already cached, so a second pass asks nobody.
+        with mock.patch.object(email_parser.requests, "get", fake_get):
+            self.assertEqual(email_parser.prefetch_robots(self.urls, verbose=False), 0)
 
 
 if __name__ == "__main__":

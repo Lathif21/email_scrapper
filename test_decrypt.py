@@ -13,12 +13,15 @@ console. PYTHONIOENCODING forces the failing condition.
 import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
 
+import secure_files
+from decrypt import decrypt_file
 from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file, managed_path,
                      warn_if_replacing)
 
@@ -171,6 +174,58 @@ class DecryptCliTests(unittest.TestCase):
             capture_output=True, env=env, timeout=120)
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn(b"Traceback", proc.stderr)
+
+
+class OutputPermissionTests(unittest.TestCase):
+    """Task 07 — ciphertext and recovered plaintext are owner-only."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.plain = os.path.join(self.dir, "kontak.csv")
+        with io.open(self.plain, "w", encoding="utf-8-sig", newline="") as f:
+            f.write(CSV_TEXT)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_ciphertext_is_restricted(self):
+        out = os.path.join(self.dir, "a.csv.enc")
+        with mock.patch("secure_files.os.chmod") as chmod:
+            encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
+        chmod.assert_any_call(out, secure_files.FILE_MODE)
+
+    def test_recovered_plaintext_is_restricted(self):
+        out = os.path.join(self.dir, "b.csv.enc")
+        encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
+        recovered = os.path.join(self.dir, "b.csv")
+        with mock.patch("secure_files.os.chmod") as chmod:
+            decrypt_file(out, recovered, PASSWORD)
+        chmod.assert_any_call(recovered, secure_files.FILE_MODE)
+
+    def test_the_managed_directories_are_restricted(self):
+        with mock.patch("secure_files.os.chmod") as chmod:
+            managed_path(os.path.join(self.dir, "output", "encrypted"), "x.csv")
+        chmod.assert_any_call(os.path.join(self.dir, "output", "encrypted"),
+                              secure_files.DIR_MODE)
+        chmod.assert_any_call(os.path.join(self.dir, "output"),
+                              secure_files.DIR_MODE)
+
+    def test_a_refused_chmod_does_not_break_encryption(self):
+        out = os.path.join(self.dir, "c.csv.enc")
+        with mock.patch("secure_files.os.chmod",
+                        side_effect=OSError(1, "Operation not permitted")):
+            encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
+        self.assertTrue(os.path.exists(out))
+
+    @unittest.skipIf(os.name == "nt", "Windows tidak punya mode bit POSIX")
+    def test_the_real_modes_on_posix(self):
+        out = os.path.join(self.dir, "d.csv.enc")
+        encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
+
+        recovered = os.path.join(self.dir, "d.csv")
+        decrypt_file(out, recovered, PASSWORD)
+        self.assertEqual(stat.S_IMODE(os.stat(recovered).st_mode), 0o600)
 
 
 if __name__ == "__main__":

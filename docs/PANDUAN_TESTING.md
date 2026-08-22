@@ -20,13 +20,14 @@ python -m unittest test_email_parser test_query_tools test_serper_search \
                   test_search_state test_render_fetch test_decrypt
 ```
 
-Baseline saat ini: **262 test lolos**. Angka ini tidak boleh turun setelah
-perubahan apa pun.
+Baseline saat ini: **299 test lolos** (plus 2 dilewati di Windows — keduanya
+memeriksa mode bit POSIX, yang tidak ada di sana). Angka ini tidak boleh turun
+setelah perubahan apa pun.
 
 > **Windows:** pakai `python`, bukan `python3` — `python3` tidak ada di
 > instalasi Python resmi Windows.
 
-### Lima regresi yang wajib selalu lolos
+### Enam regresi yang wajib selalu lolos
 
 Kelimanya berasal dari bug nyata yang pernah terjadi. Kalau salah satu gagal, ada perbaikan lama yang rusak:
 

@@ -35,6 +35,8 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from secure_files import secure_dir, secure_file
+
 try:
     from dotenv import load_dotenv
     load_dotenv()  # reads .env in the current directory into os.environ, if present
@@ -61,6 +63,12 @@ def managed_path(directory: str, filename: str) -> str:
     managed directory rather than recreating the caller's tree underneath it.
     """
     os.makedirs(directory, exist_ok=True)
+    # Both levels: a directory anyone can list tells them which companies were
+    # scraped and when, even when they cannot open the files themselves.
+    parent = os.path.dirname(directory)
+    if parent:
+        secure_dir(parent)
+    secure_dir(directory)
     return os.path.join(directory, os.path.basename(filename))
 
 
@@ -131,6 +139,7 @@ def encrypt_file(input_path: str, output_path: str, password: str,
 
     with open(output_path, "wb") as f:
         f.write(encrypt_bytes(data, password))
+    secure_file(output_path)
 
     if remove_plaintext:
         try:
