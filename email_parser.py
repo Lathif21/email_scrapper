@@ -408,20 +408,51 @@ def extract_company_name(html: str, url: str = "") -> str:
     return domain.rsplit(".", 1)[0].replace("-", " ").title() if domain else ""
 
 
+# A bare Indonesian mobile written without a country code or trunk zero:
+# "81234567890". Indonesian mobiles start with 8 and carry 9-12 subscriber
+# digits, which is what separates this from a foreign number that merely
+# happens to begin with 8 (China +86, Japan +81, Korea +82 are all longer).
+_BARE_ID_MOBILE_MIN = 9
+_BARE_ID_MOBILE_MAX = 12
+
+
 def normalize_phone(raw: str) -> str:
-    """Normalize to +62XXXXXXXXX so the same number in different formats dedupes."""
-    digits = re.sub(r"[-.\s()]", "", raw).lstrip("+")
+    """Normalize an Indonesian number to +62XXXXXXXXX so formats dedupe.
+
+    A number that already carries a different country code is returned with
+    that code intact, NOT rewritten as Indonesian.
+
+    That last part is the fix for a real data-corruption bug: this used to
+    prefix '62' onto anything that did not start with 62 or 0, so a hotel's
+    `wa.me/97125019000` (Abu Dhabi, +971 2 501 9000) became "+6297125019000" —
+    a number that does not exist. It was undetectable downstream, because 971
+    genuinely is an Indonesian (Papua) area code, so the invented number passed
+    every plausibility check a validator could apply.
+    """
+    digits = re.sub(r"[-.\s()]", "", raw or "").lstrip("+")
+    if not digits.isdigit():
+        digits = "".join(c for c in digits if c.isdigit())
+    if not digits:
+        return ""
 
     if digits.startswith("62"):
         # Sites routinely write the country code AND the local trunk '0'
         # (e.g. wa.me/62081212222024). Both name the same subscriber, so the
         # trunk zero has to go or one number yields two rows that never dedupe.
-        digits = "62" + digits[2:].lstrip("0")
-    elif digits.startswith("0"):
-        digits = "62" + digits.lstrip("0")
-    else:
-        digits = "62" + digits
+        return "+62" + digits[2:].lstrip("0")
 
+    if digits.startswith("0"):
+        # Local format, trunk zero replaced by the country code.
+        return "+62" + digits.lstrip("0")
+
+    if (digits.startswith("8")
+            and _BARE_ID_MOBILE_MIN <= len(digits) <= _BARE_ID_MOBILE_MAX):
+        # Indonesian mobile with both the country code and trunk zero omitted.
+        return "+62" + digits
+
+    # Already international, and not Indonesian. Keep it as published: a UAE or
+    # Singapore number is still a reachable contact, and inventing an
+    # Indonesian one from it destroys the only usable value the page had.
     return "+" + digits
 
 

@@ -924,6 +924,57 @@ class PhoneLengthTests(unittest.TestCase):
         self.assertEqual(extract_contacts(html, "https://h.co.id").phones, set())
 
 
+class ForeignNumberTests(unittest.TestCase):
+    """normalize_phone() must not invent Indonesian numbers from foreign ones.
+
+    The bug this pins was found in real output: a hotel page published
+    `wa.me/97125019000` (Cleveland Clinic Abu Dhabi, +971 2 501 9000) and the
+    CSV recorded "+6297125019000". Nothing downstream could catch it, because
+    971 genuinely is an Indonesian (Papua) area code — so the invented number
+    passed every plausibility check available.
+    """
+
+    OBSERVED = {
+        # Seen in a real run.
+        "97125019000": "+97125019000",      # UAE
+        "18779993223": "+18779993223",      # US toll-free
+        # Same failure mode, other countries.
+        "12125551234": "+12125551234",      # US
+        "6598765432": "+6598765432",        # Singapore
+        "60123456789": "+60123456789",      # Malaysia
+        "8613812345678": "+8613812345678",  # China — starts with 8 but too long
+    }
+
+    def test_foreign_numbers_keep_their_country_code(self):
+        for raw, expected in self.OBSERVED.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_phone(raw), expected)
+
+    def test_the_abu_dhabi_number_is_no_longer_indonesian(self):
+        result = normalize_phone("97125019000")
+        self.assertFalse(result.startswith("+62"))
+        self.assertNotEqual(result, "+6297125019000")
+
+    def test_foreign_wa_link_is_not_rewritten(self):
+        html = '<a href="https://wa.me/97125019000">WhatsApp</a><p>Klinik kami</p>'
+        result = extract_contacts(html, "https://clinic.ae/")
+        self.assertEqual(result.whatsapp, {"+97125019000"})
+
+    def test_foreign_number_fails_the_indonesian_mobile_check(self):
+        """It is a real contact, but not an Indonesian mobile — and now says so."""
+        self.assertFalse(is_valid_id_mobile(normalize_phone("97125019000")))
+
+    def test_bare_indonesian_mobile_still_gets_the_country_code(self):
+        # Country code and trunk zero both omitted — still Indonesian.
+        self.assertEqual(normalize_phone("81234567890"), "+6281234567890")
+        self.assertEqual(normalize_phone("8123456789"), "+628123456789")
+
+    def test_empty_and_junk_input_do_not_crash(self):
+        for raw in ("", "   ", "-", "n/a", None):
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_phone(raw), "")
+
+
 class PhoneRegressionTests(unittest.TestCase):
     """Pinning behaviour that was verified correct — do not loosen."""
 

@@ -138,10 +138,24 @@ information needed to decide whether a number is safe to contact.
 
 ### Normalization and dedup
 
-All numbers normalize to `+62XXXXXXXXX` before deduplication, so `0812-3456-7890`,
-`+62 812 3456 7890`, and `62812 3456 7890` collapse into one row. A number that
-appears both as a WhatsApp link and as page text is emitted once, as `whatsapp` —
-the higher-confidence classification wins.
+Indonesian numbers normalize to `+62XXXXXXXXX` before deduplication, so
+`0812-3456-7890`, `+62 812 3456 7890`, and `62812 3456 7890` collapse into one
+row. A number that appears both as a WhatsApp link and as page text is emitted
+once, as `whatsapp` — the higher-confidence classification wins.
+
+**A foreign number keeps its own country code.** This used to be wrong in a way
+that could not be detected downstream: anything not starting with `62` or `0` had
+`62` prefixed to it, so a hotel's `wa.me/97125019000` (Abu Dhabi,
++971 2 501 9000) was recorded as `+6297125019000`. That fabricated number passed
+every plausibility check available, because `971` genuinely is an Indonesian
+(Papua) area code — the shape was indistinguishable from a real landline. The
+only place the two could be told apart was at the point of normalization, before
+the country code was lost, which is where the check now lives.
+
+The narrow exception is a bare Indonesian mobile with both the country code and
+the trunk zero omitted (`81234567890`): starts with `8` and 9-12 digits long.
+Foreign numbers beginning with `8` — China +86, Japan +81, Korea +82 — are
+longer than that, so they fall through to the international branch.
 
 ### Regex conservatism
 

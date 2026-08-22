@@ -498,16 +498,26 @@ class AuditTests(unittest.TestCase):
         # The 10-digit offcut from Task 01 stays rejected.
         self.assertFalse(audit_output.is_plausible_id_phone("+6282783139"))
 
-    def test_mangled_foreign_number_can_be_indistinguishable(self):
-        """Pins a known limit rather than pretending the check is complete.
+    def test_shape_check_alone_cannot_spot_a_mangled_foreign_number(self):
+        """Why the fix had to be at the source, not here.
 
-        wa.me/97125019000 is Abu Dhabi (+971 2 501 9000). normalize_phone()
-        prefixes 62, giving +6297125019000 — and 971 really is an Indonesian
-        (Papua) area code, so by shape alone this is a valid Indonesian
-        landline. No audit-side check can separate the two; the fix belongs in
-        normalize_phone(), which must stop prefixing 62 onto foreign numbers.
+        "+6297125019000" is shaped exactly like a valid Indonesian landline —
+        971 really is a Papua area code — so no audit-side check can tell it
+        apart from a genuine number. That is why normalize_phone() was fixed to
+        stop prefixing 62 onto foreign numbers: this string is no longer
+        produced. The assertion documents the blind spot that made the source
+        fix necessary.
         """
         self.assertTrue(audit_output.is_plausible_id_phone("+6297125019000"))
+
+    def test_the_source_no_longer_produces_that_string(self):
+        """The hole above is closed upstream, in email_parser."""
+        import email_parser
+        self.assertEqual(email_parser.normalize_phone("97125019000"),
+                         "+97125019000")
+        self.assertFalse(
+            audit_output.is_plausible_id_phone(
+                email_parser.normalize_phone("97125019000")))
 
     def test_mobile_and_landline_are_reported_separately(self):
         self.write(

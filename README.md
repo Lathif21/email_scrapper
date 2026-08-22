@@ -207,8 +207,11 @@ a single row holding the union of everything found on them.
 | `search_query` | The query that surfaced this company |
 | `status` | `ok`, or why the page yielded nothing (`blocked by robots.txt`, `403`, `bot check / interstitial`, …) |
 
-Numbers normalize to `+62XXXXXXXXX`, so one number written three ways dedupes to
-one value, and a WhatsApp number is never repeated as a low-confidence `phone`.
+Indonesian numbers normalize to `+62XXXXXXXXX`, so one number written three ways
+dedupes to one value, and a WhatsApp number is never repeated as a low-confidence
+`phone`. A number that already carries a **different** country code keeps it —
+`wa.me/97125019000` stays `+97125019000` (Abu Dhabi) rather than being rewritten
+as an Indonesian number that does not exist.
 
 ### Guessed emails — read this
 
