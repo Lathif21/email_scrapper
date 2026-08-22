@@ -202,10 +202,10 @@ a single row holding the union of everything found on them.
 | `whatsapp` | From `wa.me/…` / `api.whatsapp.com/send?phone=…` links, normalized to `+62…` |
 | `website` | A page actually read, when there was one |
 | `email_source` | **`found`** = published on the site. **`guessed`** = synthesized, see below |
-| `phone` | Low confidence — mobile-shaped digit strings from page text, length-checked |
+| `phone` | Mixed — `tel:` links and schema.org `telephone` are explicit; bare digit strings from page text are length-checked guesses |
 | `other_emails` / `other_whatsapp` | Everything else found, `;`-separated |
 | `search_query` | The query that surfaced this company |
-| `status` | `ok`, or why the page was skipped (`blocked by robots.txt`, `403`, …) |
+| `status` | `ok`, or why the page yielded nothing (`blocked by robots.txt`, `403`, `bot check / interstitial`, …) |
 
 Numbers normalize to `+62XXXXXXXXX`, so one number written three ways dedupes to
 one value, and a WhatsApp number is never repeated as a low-confidence `phone`.
@@ -242,6 +242,32 @@ real prospects.
 `--ignore-free-mail` filters `gmail.com`, `yahoo.com`, `yahoo.co.id`,
 `hotmail.com` and `outlook.com`, and prints how many addresses it dropped so the
 loss is visible rather than silent.
+
+### Where contacts are read from
+
+| Source | Confidence | Note |
+|---|---|---|
+| `mailto:` and body-text addresses | high | placeholder and image-filename filters applied |
+| schema.org JSON-LD `email` / `telephone` | high | explicitly labelled by the site; read before `<script>` blocks are stripped |
+| `wa.me` / `api.whatsapp.com` links | high | the site asserting the number is reachable |
+| `tel:` links | high | same assertion; landlines are kept, they are valid sales contacts |
+| bare digit strings in page text | low | length-checked guesses, may not be the company's |
+
+Analytics config and CSS inside `<script>` / `<style>` is stripped before the
+regexes run, so a vendor's `noreply@` cannot beat the real address. JSON-LD is
+read first, because that is the one script block holding real contact data.
+
+### Pages that are not really pages
+
+An anti-bot interstitial ("One moment, please… verifying your request") arrives
+as HTTP 200 with valid HTML. Without a check it lands in the CSV as `ok` with no
+contacts — indistinguishable from a company that publishes no address. Those
+rows are marked `bot check / interstitial` instead.
+
+On a measured sample of 10 Indonesian SME sites, **3 were interstitials** being
+recorded as `ok`. If you see many of these, the sites are refusing plain HTTP
+clients; there is no fix here that does not involve a headless browser, which
+this project deliberately does not do.
 
 ### Phone numbers are length-checked
 

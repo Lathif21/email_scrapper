@@ -95,7 +95,22 @@ def encrypt_file(input_path: str, output_path: str, password: str,
         f.write(encrypt_bytes(data, password))
 
     if remove_plaintext:
-        os.remove(input_path)
+        try:
+            os.remove(input_path)
+        except OSError as e:
+            # Windows refuses to delete a file another process holds open, which
+            # is routine here: the CSV was very likely still open in Excel or an
+            # editor. The ciphertext is already written, so raising would abort
+            # after a successful encrypt and leave the user with a traceback and
+            # no idea the plaintext survived. Say it loudly instead — the whole
+            # promise of --encrypt is that the plaintext does not linger.
+            print(f"\n[WARNING] Encrypted to '{output_path}', but could not "
+                  f"delete the plaintext '{input_path}':")
+            print(f"          {type(e).__name__}: {e}")
+            print("          The plaintext contact data is STILL ON DISK. Close "
+                  "any program holding")
+            print("          the file (Excel, an editor) and delete it yourself.")
+            return output_path
 
     return output_path
 

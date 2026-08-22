@@ -5,12 +5,20 @@ email_parser.py — fetch web pages and extract contact details.
 Extracts three contact types, each tagged with a confidence level so downstream
 consumers can filter:
 
-    email     (high) — standard address regex, image-filename false positives removed
+    email     (high) — address regex over the markup, plus schema.org JSON-LD
+                       `email` fields; image-filename false positives removed
     whatsapp  (high) — from explicit wa.me / api.whatsapp.com links
     phone     (low)  — Indonesian mobile-format digit strings found in page text,
                        validated to 11-14 digits after normalizing to +62. Still
                        low confidence — a valid-looking number need not be the
                        company's. Verify before use.
+
+Pages are also checked for anti-bot interstitials. A challenge page ("One
+moment, please... verifying your request") arrives as HTTP 200 with valid HTML,
+so nothing upstream catches it and the row would otherwise read as a company
+that publishes no address. Those rows get `status = bot check / interstitial`
+instead. On a real sample of Indonesian SME sites, 3 of 10 pages were
+interstitials being recorded as `ok`.
 
 A page that publishes no email is not the end of the search: contact-page links
 found on it ("Kontak", "Hubungi Kami", "/contact") are followed one level deep,
@@ -41,6 +49,7 @@ Library usage (how main.py calls it):
 
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -62,6 +71,15 @@ EMAIL_REGEX = re.compile(
 # specifically as WhatsApp contacts.
 WA_LINK_REGEX = re.compile(
     r"(?:api\.whatsapp\.com/send\?phone=|wa\.me/)(\+?\d{8,15})",
+    re.IGNORECASE,
+)
+
+# A tel: href is an explicit publication of a reachable number, the same class
+# of signal as a wa.me link. Kept separate from PHONE_REGEX so it can skip the
+# mobile-length check: businesses publish landlines here (+62 21 5551234), and
+# a landline is a perfectly good sales contact.
+TEL_LINK_REGEX = re.compile(
+    r"""href\s*=\s*["']\s*tel:\s*(\+?[\d\s.()-]{7,20})""",
     re.IGNORECASE,
 )
 
@@ -204,7 +222,45 @@ class ContactResult:
         return len(self.emails) + len(self.whatsapp) + len(self.phones)
 
 
+# Phrases that mark an anti-bot interstitial rather than real content. These
+# pages return HTTP 200 with valid HTML, so nothing upstream catches them and
+# the row lands in the CSV as "ok" with no contacts — indistinguishable from a
+# company that genuinely publishes no address. Measured on a real sample of
+# Indonesian SME sites: 3 of 10 pages were interstitials recorded as ok.
+BOT_CHECK_MARKERS = (
+    "one moment, please",
+    "please wait while your request is being verified",
+    "checking your browser",
+    "just a moment",
+    "verifying you are human",
+    "enable javascript and cookies to continue",
+    "ddos protection by",
+    "cf-browser-verification",
+    "attention required! | cloudflare",
+    "captcha",
+)
+
+# An interstitial carries almost no text. A real page that merely happens to
+# contain one of these phrases will be far longer, so the length guard keeps
+# the check from throwing away genuine content.
+BOT_CHECK_MAX_TEXT = 400
+
+
 # ---------------------------------------------------------------- extraction
+
+def looks_like_bot_check(text: str) -> bool:
+    """True if this page is an anti-bot interstitial, not content.
+
+    `text` is the visible text with script/style already stripped. Both
+    conditions must hold: a known marker phrase AND almost no text. Either
+    alone produces false positives — a security blog discussing CAPTCHAs, or
+    a legitimately sparse landing page.
+    """
+    if not text or len(text) > BOT_CHECK_MAX_TEXT:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in BOT_CHECK_MARKERS)
+
 
 def is_allowed_by_robots(url: str, user_agent: str = None) -> bool:
     """Check robots.txt. Fails open (True) if robots.txt is missing or unreachable."""
@@ -375,6 +431,61 @@ def is_valid_id_mobile(normalized: str) -> bool:
     return digits.startswith("628") and 11 <= len(digits) <= 14
 
 
+def _walk_json(node):
+    """Yield every dict inside a nested JSON structure."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_json(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_json(item)
+
+
+def extract_json_ld_contacts(soup) -> tuple:
+    """(emails, phones) from schema.org JSON-LD blocks.
+
+    Hotels, restaurants and clinics routinely publish `email` and `telephone`
+    in a LocalBusiness / Organization block. Those fields are explicitly
+    labelled, so they are better evidence than a regex hit in body text.
+
+    Nested structures are walked because the contact details usually sit under
+    `contactPoint`, `address`, or inside an `@graph` array rather than at the
+    top level. Malformed JSON is skipped — plenty of sites ship broken blocks,
+    and one bad block must not lose the rest of the page.
+    """
+    emails, phones = [], []
+
+    for tag in soup.find_all("script"):
+        tag_type = (tag.get("type") or "").lower()
+        if "ld+json" not in tag_type:
+            continue
+        raw = tag.string or tag.get_text() or ""
+        if not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+
+        for node in _walk_json(data):
+            for key in ("email", "contactEmail"):
+                value = node.get(key)
+                if isinstance(value, str) and "@" in value:
+                    address = value.strip()
+                    # Not lstrip("mailto:") — that strips any leading character
+                    # in that set, turning "info@..." into "nfo@...".
+                    if address.lower().startswith("mailto:"):
+                        address = address[len("mailto:"):]
+                    emails.append(address.strip())
+            for key in ("telephone", "phone", "faxNumber"):
+                value = node.get(key)
+                if isinstance(value, str) and any(c.isdigit() for c in value):
+                    phones.append(normalize_phone(value.strip()))
+
+    return emails, phones
+
+
 def extract_contacts(html: str, url: str = "") -> ContactResult:
     """Pull all contact types out of raw HTML. No network access — safe to unit test."""
     result = ContactResult(url=url)
@@ -388,19 +499,42 @@ def extract_contacts(html: str, url: str = "") -> ContactResult:
     # Markup, not get_text(): mailto: and wa.me live in href attributes, which
     # text-only extraction throws away.
     soup = BeautifulSoup(html, "html.parser")
+
+    # Read JSON-LD before the scripts are thrown away. schema.org blocks carry
+    # an explicitly labelled email/telephone, which beats guessing from body
+    # text — and on sites whose contact details are only in the structured data
+    # it is the difference between a lead and an empty row.
+    ld_emails, ld_phones = extract_json_ld_contacts(soup)
+
     for element in soup(["script", "style", "noscript", "template"]):
         element.decompose()
     markup = str(soup)
 
-    result.emails = clean_emails(EMAIL_REGEX.findall(markup))
+    text = soup.get_text(" ", strip=True)
+    if looks_like_bot_check(text):
+        # Not a company with no address — a page we were never shown. Saying so
+        # keeps it out of the "no contact published" bucket.
+        result.error = "bot check / interstitial"
+        return result
+
+    result.emails = clean_emails(list(EMAIL_REGEX.findall(markup)) + ld_emails)
     # wa.me links are read from the original HTML. hrefs survive the strip, but
     # this is the highest-confidence signal here and isn't worth risking.
     result.whatsapp = {normalize_phone(n) for n in WA_LINK_REGEX.findall(html)}
+
+    # A tel: href is the site stating a number is reachable, the same kind of
+    # explicit claim a wa.me link makes, so it is trusted like one and skips
+    # the mobile-length check — businesses publish landlines this way.
+    tel_numbers = {normalize_phone(n) for n in TEL_LINK_REGEX.findall(html)}
+
     # Length-checked: the regex still matches price fragments and ID offcuts
     # that happen to look phone-shaped, and an invalid number in the output is
     # worse than none — it gets dialled.
     text_phones = {n for n in (normalize_phone(m) for m in PHONE_REGEX.findall(markup))
                    if is_valid_id_mobile(n)}
+    text_phones |= {n for n in ld_phones if is_valid_id_mobile(n)}
+    text_phones |= tel_numbers
+
     # A number already confirmed as WhatsApp shouldn't also appear as a low-confidence phone.
     result.phones = text_phones - result.whatsapp
     return result

@@ -322,7 +322,14 @@ def stage_output(rows: list, args) -> None:
     encrypted_path = args.output + ".enc"
     encrypt_file(args.output, encrypted_path, password, remove_plaintext=True)
 
-    print(f"Encrypted -> '{encrypted_path}' (plaintext removed)")
+    # Don't claim the plaintext is gone without looking: on Windows the delete
+    # fails whenever another process holds the file open, and encrypt_file
+    # reports that rather than raising.
+    if os.path.exists(args.output):
+        print(f"Encrypted -> '{encrypted_path}'")
+        print(f"Plaintext '{args.output}' could NOT be removed — see the warning above.")
+    else:
+        print(f"Encrypted -> '{encrypted_path}' (plaintext removed)")
     print(f"Decrypt with: python decrypt.py {encrypted_path}")
 
 

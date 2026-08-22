@@ -33,7 +33,10 @@ oyorooms.com
 yelp.com
 foursquare.com
 google.com
+google.co.id
+google.cz
 yellowpages.co.id
+misteraladin.com
 
 # Social & profiles
 facebook.com

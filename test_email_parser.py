@@ -568,6 +568,141 @@ class FollowContactTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- regressions
 
+class BotCheckTests(unittest.TestCase):
+    """An interstitial served as HTTP 200 must not read as 'no contact'."""
+
+    # Verbatim from greenjaket.com and konveksibandungjaya.id, which both
+    # returned this with HTTP 200 and were recorded as ok/no-contacts.
+    INTERSTITIAL = ("<html><body><div>One moment, please... Loader Please wait "
+                    "while your request is being verified...</div></body></html>")
+
+    def test_interstitial_is_reported_as_an_error(self):
+        result = extract_contacts(self.INTERSTITIAL, "https://konveksi.co.id/")
+        self.assertEqual(result.error, "bot check / interstitial")
+        self.assertEqual(result.total, 0)
+
+    def test_cloudflare_challenge_is_caught(self):
+        html = "<html><body>Checking your browser before accessing</body></html>"
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").error,
+                         "bot check / interstitial")
+
+    def test_a_real_page_is_not_flagged(self):
+        html = ('<html><body><p>Kontak: sales@ptmaju.co.id</p>'
+                '<p>Alamat lengkap kami ada di Bandung.</p></body></html>')
+        result = extract_contacts(html, "https://ptmaju.co.id/")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.emails, {"sales@ptmaju.co.id"})
+
+    def test_long_page_mentioning_captcha_is_not_flagged(self):
+        # A security blog discussing CAPTCHAs must survive the check.
+        html = ("<html><body><p>Kontak: sales@ptmaju.co.id</p><p>"
+                + ("Artikel tentang captcha dan proteksi bot. " * 40)
+                + "</p></body></html>")
+        result = extract_contacts(html, "https://ptmaju.co.id/")
+        self.assertIsNone(result.error)
+        self.assertIn("sales@ptmaju.co.id", result.emails)
+
+    def test_short_legitimate_page_without_markers_is_kept(self):
+        html = "<html><body><p>Email: info@kecil.co.id</p></body></html>"
+        result = extract_contacts(html, "https://kecil.co.id/")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.emails, {"info@kecil.co.id"})
+
+    def test_marker_detection_is_length_guarded(self):
+        self.assertTrue(email_parser.looks_like_bot_check("Just a moment..."))
+        self.assertFalse(email_parser.looks_like_bot_check(
+            "Just a moment... " + "x" * 500))
+        self.assertFalse(email_parser.looks_like_bot_check(""))
+
+
+class JsonLdTests(unittest.TestCase):
+    """schema.org blocks carry explicitly labelled contact details."""
+
+    def test_email_and_telephone_are_read(self):
+        html = '''<html><head><script type="application/ld+json">
+        {"@type":"Hotel","name":"Hotel Bumi","email":"info@bumi.co.id",
+         "telephone":"+6281133308900"}
+        </script></head><body><p>Selamat datang di hotel kami.</p></body></html>'''
+        result = extract_contacts(html, "https://bumi.co.id/")
+        self.assertIn("info@bumi.co.id", result.emails)
+        self.assertIn("+6281133308900", result.phones)
+
+    def test_nested_graph_and_contact_point_are_walked(self):
+        html = '''<html><head><script type="application/ld+json">
+        {"@graph":[{"@type":"Organization","contactPoint":[
+          {"@type":"ContactPoint","email":"sales@maju.co.id",
+           "telephone":"0812-3456-7890"}]}]}
+        </script></head><body><p>Halaman perusahaan kami.</p></body></html>'''
+        result = extract_contacts(html, "https://maju.co.id/")
+        self.assertIn("sales@maju.co.id", result.emails)
+        self.assertIn("+6281234567890", result.phones)
+
+    def test_mailto_prefix_is_stripped(self):
+        html = '''<html><head><script type="application/ld+json">
+        {"email":"mailto:info@maju.co.id"}
+        </script></head><body><p>Isi halaman perusahaan.</p></body></html>'''
+        self.assertIn("info@maju.co.id",
+                      extract_contacts(html, "https://maju.co.id/").emails)
+
+    def test_broken_json_is_skipped_not_fatal(self):
+        html = '''<html><head>
+        <script type="application/ld+json">{ this is not json }</script>
+        <script type="application/ld+json">{"email":"ok@maju.co.id"}</script>
+        </head><body><p>Halaman perusahaan kami di sini.</p></body></html>'''
+        result = extract_contacts(html, "https://maju.co.id/")
+        self.assertIn("ok@maju.co.id", result.emails)
+
+    def test_placeholder_filters_still_apply_to_json_ld(self):
+        html = '''<html><head><script type="application/ld+json">
+        {"email":"example@example.com"}
+        </script></head><body><p>Halaman perusahaan kami di sini.</p></body></html>'''
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").emails, set())
+
+    def test_invalid_json_ld_phone_is_still_length_checked(self):
+        html = '''<html><head><script type="application/ld+json">
+        {"telephone":"082783139"}
+        </script></head><body><p>Halaman perusahaan kami di sini.</p></body></html>'''
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").phones, set())
+
+    def test_non_ld_script_is_not_parsed_for_contacts(self):
+        html = ('<html><head><script>var ga={"trackingEmail":'
+                '"noreply@vendor.com"};</script></head>'
+                '<body><p>Halaman perusahaan kami di sini.</p></body></html>')
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").emails, set())
+
+
+class TelLinkTests(unittest.TestCase):
+    """A tel: href is the site asserting the number works."""
+
+    def test_tel_link_is_captured(self):
+        html = ('<html><body><a href="tel:+6281234567890">Telepon</a>'
+                '<p>Halaman kontak perusahaan kami.</p></body></html>')
+        result = extract_contacts(html, "https://maju.co.id/")
+        self.assertIn("+6281234567890", result.phones)
+
+    def test_landline_tel_link_survives_the_mobile_check(self):
+        # +62 22 2011000 is a Bandung landline — a valid sales contact that a
+        # mobile-only length rule would throw away.
+        html = ('<html><body><a href="tel:+62 22 2011000">Telepon</a>'
+                '<p>Halaman kontak perusahaan kami.</p></body></html>')
+        result = extract_contacts(html, "https://maju.co.id/")
+        self.assertIn("+62222011000", result.phones)
+
+    def test_tel_link_matching_a_whatsapp_number_is_not_duplicated(self):
+        html = ('<html><body><a href="tel:081234567890">Telepon</a>'
+                '<a href="https://wa.me/6281234567890">WA</a>'
+                '<p>Halaman kontak perusahaan kami.</p></body></html>')
+        result = extract_contacts(html, "https://maju.co.id/")
+        self.assertEqual(result.whatsapp, {"+6281234567890"})
+        self.assertEqual(result.phones, set())
+
+    def test_spaced_and_dashed_tel_values_normalize(self):
+        html = ('<html><body><a href="tel:0812-3456-7890">a</a>'
+                '<p>Halaman kontak perusahaan kami.</p></body></html>')
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").phones,
+                         {"+6281234567890"})
+
+
 class PhoneLengthTests(unittest.TestCase):
     """Task 01 item 1 — the 10-digit numbers that polluted 71% of the output."""
 
