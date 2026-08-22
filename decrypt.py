@@ -30,7 +30,20 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from encrypt import SALT_SIZE, derive_key, resolve_password
+from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, SALT_SIZE, derive_key,
+                     managed_path, resolve_password, warn_if_replacing)
+
+
+def _find_encrypted():
+    """Encrypted files, from the managed directory first then the cwd.
+
+    The cwd is still searched so files produced before outputs were funnelled
+    into output/ are still discoverable.
+    """
+    found = sorted(Path(ENCRYPTED_DIR).glob("*.enc"))
+    seen = {p.name for p in found}
+    found += [p for p in sorted(Path(".").glob("*.enc")) if p.name not in seen]
+    return found
 
 
 # Signatures of file types people point at this script by mistake. A Fernet
@@ -115,9 +128,11 @@ def main():
     parser.add_argument("input_file", nargs="?",
                         help="Encrypted file (e.g. contacts.csv.enc)")
     parser.add_argument("--list", action="store_true",
-                        help="List encrypted (.enc) files in this folder and exit")
+                        help=f"List encrypted (.enc) files in {ENCRYPTED_DIR}/ "
+                             "and this folder, then exit")
     parser.add_argument("-o", "--output", default=None,
-                        help="Output path (default: strip the .enc suffix)")
+                        help=f"Output path. Default: {DECRYPTED_DIR}/<name> "
+                             "with the .enc suffix stripped")
     parser.add_argument("--stdout", action="store_true",
                         help="Print decrypted content instead of writing a file")
     parser.add_argument("--preview", type=int, metavar="N", default=None,
@@ -127,12 +142,12 @@ def main():
     args = parser.parse_args()
 
     if args.list:
-        found = sorted(Path(".").glob("*.enc"))
+        found = _find_encrypted()
         if not found:
-            print("No .enc files in this folder.")
+            print(f"No .enc files in {ENCRYPTED_DIR}/ or this folder.")
             print("Create one with: python main.py \"your query\" --encrypt")
         else:
-            print("Encrypted files here:")
+            print("Encrypted files:")
             for path in found:
                 print(f"    {path}    ({path.stat().st_size:,} bytes)")
             print(f"\nRead one with: python decrypt.py {found[0]} --preview 20")
@@ -146,9 +161,9 @@ def main():
             blob = f.read()
     except FileNotFoundError:
         print(f"Error: '{args.input_file}' not found.", file=sys.stderr)
-        nearby = sorted(Path(".").glob("*.enc"))
+        nearby = _find_encrypted()
         if nearby:
-            print("\nEncrypted files in this folder:", file=sys.stderr)
+            print("\nEncrypted files found:", file=sys.stderr)
             for path in nearby:
                 print(f"    {path}", file=sys.stderr)
         sys.exit(1)
@@ -181,12 +196,13 @@ def main():
         sys.stdout.buffer.write(data)
         return
 
-    output_path = args.output
-    if output_path is None:
-        output_path = (
-            args.input_file[:-4] if args.input_file.endswith(".enc")
-            else args.input_file + ".dec"
-        )
+    if args.output:
+        output_path = args.output           # an explicit path wins
+    else:
+        name = Path(args.input_file).name
+        name = name[:-4] if name.endswith(".enc") else name + ".dec"
+        output_path = managed_path(DECRYPTED_DIR, name)
+    warn_if_replacing(output_path)
 
     with open(output_path, "wb") as f:
         f.write(data)

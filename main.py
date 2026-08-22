@@ -4,7 +4,7 @@ main.py — end-to-end contact research pipeline.
 
     search query  ->  serper_search           ->  URLs
                   ->  email_parser            ->  contacts
-                  ->  encrypt                 ->  contacts.csv.enc
+                  ->  encrypt                 ->  output/encrypted/*.csv.enc
 
 Usage:
     # Single query, plaintext output
@@ -89,6 +89,18 @@ Resumable search:
 
     --list-progress prints what every tracked query has collected.
 
+Where files land:
+    output/encrypted/   every .enc written by --encrypt
+    output/decrypted/   every file decrypt.py writes back
+    -o                  the plaintext CSV path (yours to choose)
+
+    Funnelling encrypted output into one directory keeps contact data from
+    scattering across the repo, and output/ is gitignored. Because names now
+    collide across runs, an overwrite is announced before it happens: for a
+    .enc the plaintext is normally deleted, so the file being replaced can be
+    the only copy of that data. An explicit -o on encrypt.py or decrypt.py is
+    still honoured as given.
+
 Password (for --encrypt) resolves in this order:
     1. --password argument
     2. SCRAPER_PASSWORD environment variable  (recommended)
@@ -104,7 +116,8 @@ import email_parser
 import google_search_scrapper as searcher
 import query_tools
 import search_state
-from encrypt import encrypt_file, resolve_password
+from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file, managed_path,
+                     resolve_password, warn_if_replacing)
 
 
 BANNER = r"""
@@ -453,7 +466,11 @@ def stage_output(rows: list, args) -> None:
     password = resolve_password(args.password, confirm=not bool(
         args.password or os.environ.get("SCRAPER_PASSWORD")
     ))
-    encrypted_path = args.output + ".enc"
+    # Every encrypted output lands in one managed directory, so contact data is
+    # never scattered across the repo.
+    encrypted_path = managed_path(ENCRYPTED_DIR,
+                                  os.path.basename(args.output) + ".enc")
+    warn_if_replacing(encrypted_path)
     encrypt_file(args.output, encrypted_path, password, remove_plaintext=True)
 
     # Don't claim the plaintext is gone without looking: on Windows the delete

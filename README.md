@@ -13,10 +13,10 @@ emails / WhatsApp numbers / phone numbers, and encrypt the output at rest.
   [2] email_parser.py             fetch each page -> emails, WhatsApp, phones
       |
       v
-  [3] encrypt.py                  contacts.csv -> contacts.csv.enc
+  [3] encrypt.py                  contacts.csv -> output/encrypted/*.enc
       |
       v
-  [ ] decrypt.py                  read it back in your tool / dashboard
+  [ ] decrypt.py                  -> output/decrypted/, or your dashboard
 ```
 
 `main.py` runs all three stages in one command. Each module also works standalone.
@@ -34,8 +34,8 @@ walkthrough below covers both.
 ```bash
 pip install -r requirements.txt                                   # once
 python main.py "hotel Bandung kontak" --num-results 20 --dry-run  # preview URLs
-python main.py "hotel Bandung kontak" --num-results 20 --encrypt  # -> contacts.csv.enc
-python decrypt.py contacts.csv.enc --preview 20                   # read it back
+python main.py "hotel Bandung kontak" --num-results 20 --encrypt  # -> output/encrypted/
+python decrypt.py output/encrypted/contacts.csv.enc --preview 20   # read it back
 ```
 
 Everything below is the same four steps, explained.
@@ -115,12 +115,31 @@ All three stages run, and the last two lines tell you exactly what to do next:
 
 ```
 Wrote 7 row(s) -> 'contacts.csv'
-Encrypted -> 'contacts.csv.enc' (plaintext removed)
-Decrypt with: python decrypt.py contacts.csv.enc
+Encrypted -> 'output\encrypted\contacts.csv.enc' (plaintext removed)
+Decrypt with: python decrypt.py output\encrypted\contacts.csv.enc
 ```
 
-`--encrypt` **deletes the plaintext `contacts.csv`** after encrypting it, so
-`contacts.csv.enc` is the only copy. Leave `--encrypt` off while you're still
+`--encrypt` **deletes the plaintext `contacts.csv`** after encrypting it, so the
+`.enc` is the only copy. It is written to **`output/encrypted/`**:
+
+```
+Wrote 1 row(s) -> 'contacts.csv'
+Encrypted -> 'output\encrypted\contacts.csv.enc' (plaintext removed)
+```
+
+Everything `decrypt.py` writes back lands in **`output/decrypted/`**. Both
+directories are created on demand and `output/` is gitignored, so contact data
+stays off GitHub.
+
+Because every run funnels into the same directory, names collide far more easily
+than when outputs sat beside their inputs — so an overwrite is announced before
+it happens:
+
+```
+[REPLACING] 'output\encrypted\kontak.csv.enc' (dibuat 2026-08-22 18:24, 584 byte) ditimpa.
+```
+
+Pass `-o` to `encrypt.py` or `decrypt.py` and that exact path is used instead. Leave `--encrypt` off while you're still
 experimenting and you'll get a plain readable CSV instead.
 
 Expect some URLs to be skipped — `robots.txt` disallows, `403`, or a broken
@@ -129,7 +148,7 @@ certificate. That's normal and the run continues.
 ### 5. Read the results back
 
 ```bash
-python decrypt.py contacts.csv.enc --preview 20
+python decrypt.py output/encrypted/contacts.csv.enc --preview 20
 ```
 
 ```
@@ -138,19 +157,21 @@ email,reservation.bdg@el-hotels.com,high,https://bandung.el-hotels.com/,hotel Ba
 whatsapp,+6281212222024,high,https://bandung.el-hotels.com/,hotel Bandung kontak
 ```
 
-Forgot the filename? `python decrypt.py --list` shows every `.enc` file in the
-folder and prints the exact command to open one.
+Forgot the filename? `python decrypt.py --list` shows every `.enc` file in
+`output/encrypted/` — plus any left in the current folder from before outputs
+were funnelled there — and prints the exact command to open one.
 
 | I want to… | Command |
 |---|---|
-| Peek at the first 20 lines | `python decrypt.py contacts.csv.enc --preview 20` |
-| Print the whole thing | `python decrypt.py contacts.csv.enc --stdout` |
-| Get a normal CSV back on disk | `python decrypt.py contacts.csv.enc` |
-| Write it somewhere specific | `python decrypt.py contacts.csv.enc -o final.csv` |
+| Peek at the first 20 lines | `python decrypt.py output/encrypted/contacts.csv.enc --preview 20` |
+| Print the whole thing | `python decrypt.py output/encrypted/contacts.csv.enc --stdout` |
+| Get a normal CSV back on disk | `python decrypt.py output/encrypted/contacts.csv.enc` -> `output/decrypted/` |
+| Write it somewhere specific | `python decrypt.py output/encrypted/contacts.csv.enc -o final.csv` |
 | See which files I can open | `python decrypt.py --list` |
 
-Plain `python decrypt.py contacts.csv.enc` (no flags) writes the decrypted
-`contacts.csv` back to disk — that's the one to use before opening it in Excel.
+Plain `python decrypt.py output/encrypted/contacts.csv.enc` (no flags) writes
+`output/decrypted/contacts.csv` — that's the one to use before opening it in
+Excel.
 
 **`decrypt.py` only reads files made by `encrypt.py` / `main.py --encrypt`.** It
 is not a general-purpose decoder — pointing it at a `.pyc`, a PDF or a zip gets

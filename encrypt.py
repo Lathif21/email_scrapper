@@ -45,6 +45,44 @@ SALT_SIZE = 16
 PBKDF2_ITERATIONS = 390_000
 ENV_VAR = "SCRAPER_PASSWORD"
 
+# Managed output locations. Everything encrypted lands in one place and
+# everything decrypted in another, so contact data is never scattered across
+# the repo. Defined here rather than in decrypt.py to keep the one-way
+# dependency decrypt.py -> encrypt.py intact.
+OUTPUT_DIR = "output"
+ENCRYPTED_DIR = os.path.join(OUTPUT_DIR, "encrypted")
+DECRYPTED_DIR = os.path.join(OUTPUT_DIR, "decrypted")
+
+
+def managed_path(directory: str, filename: str) -> str:
+    """Path inside `directory`, creating it if needed. Basename only.
+
+    Only the file's name is used, so `-o reports/bali.csv` still lands in the
+    managed directory rather than recreating the caller's tree underneath it.
+    """
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, os.path.basename(filename))
+
+
+def warn_if_replacing(path: str) -> None:
+    """Say so before an existing file is overwritten.
+
+    Funnelling every run into one directory makes name collisions much more
+    likely than when outputs sat beside their own inputs — and for a `.enc` the
+    plaintext is normally deleted, so the file being replaced can be the only
+    copy of that data.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        import datetime
+        when = datetime.datetime.fromtimestamp(
+            os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+        detail = f" (dibuat {when}, {os.path.getsize(path)} byte)"
+    except OSError:
+        detail = ""
+    print(f"[REPLACING] '{path}'{detail} ditimpa.")
+
 
 def derive_key(password: str, salt: bytes) -> bytes:
     """Derive a Fernet-compatible key from a password + salt."""
@@ -119,7 +157,7 @@ def main():
     parser = argparse.ArgumentParser(description="Encrypt a file with a password.")
     parser.add_argument("input_file", help="File to encrypt")
     parser.add_argument("-o", "--output", default=None,
-                        help="Output path (default: <input>.enc)")
+                        help=f"Output path. Default: {ENCRYPTED_DIR}/<input>.enc")
     parser.add_argument("--keep", action="store_true",
                         help="Keep the plaintext file (default: delete it after encrypting)")
     parser.add_argument("--password", default=None,
@@ -130,7 +168,13 @@ def main():
         print(f"Error: '{args.input_file}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    output_path = args.output or (args.input_file + ".enc")
+    if args.output:
+        output_path = args.output           # an explicit path wins
+    else:
+        output_path = managed_path(
+            ENCRYPTED_DIR, os.path.basename(args.input_file) + ".enc")
+    warn_if_replacing(output_path)
+
     password = resolve_password(args.password, confirm=True)
 
     encrypt_file(args.input_file, output_path, password,

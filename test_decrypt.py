@@ -12,12 +12,15 @@ console. PYTHONIOENCODING forces the failing condition.
 
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from encrypt import encrypt_file
+from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file, managed_path,
+                     warn_if_replacing)
 
 
 PASSWORD = "uji123"
@@ -43,12 +46,8 @@ class DecryptCliTests(unittest.TestCase):
         encrypt_file(self.plain, self.enc, PASSWORD, remove_plaintext=False)
 
     def tearDown(self):
-        for name in os.listdir(self.dir):
-            try:
-                os.unlink(os.path.join(self.dir, name))
-            except OSError:
-                pass
-        os.rmdir(self.dir)
+        # Recursive: the managed-output tests create output/decrypted/ in here.
+        shutil.rmtree(self.dir, ignore_errors=True)
 
     def _run(self, *args, io_encoding=None):
         env = dict(os.environ, SCRAPER_PASSWORD=PASSWORD)
@@ -101,6 +100,69 @@ class DecryptCliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         with io.open(out, encoding="utf-8-sig") as f:
             self.assertEqual(f.read(), CSV_TEXT)
+
+    def test_decrypted_output_defaults_into_the_managed_directory(self):
+        """Every decrypted file lands in output/decrypted/."""
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            env = dict(os.environ, SCRAPER_PASSWORD=PASSWORD)
+            proc = subprocess.run(
+                [sys.executable, os.path.join(cwd, "decrypt.py"),
+                 os.path.basename(self.enc)],
+                capture_output=True, env=env, timeout=120)
+            self.assertEqual(proc.returncode, 0,
+                             msg=proc.stderr.decode("utf-8", "replace"))
+            landed = os.path.join(self.dir, DECRYPTED_DIR, "kontak.csv")
+            self.assertTrue(os.path.exists(landed), msg=proc.stdout)
+            with io.open(landed, encoding="utf-8-sig") as f:
+                self.assertEqual(f.read(), CSV_TEXT)
+        finally:
+            os.chdir(cwd)
+
+    def test_explicit_output_path_still_wins(self):
+        """-o is an explicit instruction and must not be redirected."""
+        out = os.path.join(self.dir, "pilihan-saya.csv")
+        proc = self._run("-o", out)
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue(os.path.exists(out))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.dir, DECRYPTED_DIR)),
+            "an explicit -o must not create the managed directory")
+
+    def test_managed_path_uses_only_the_basename(self):
+        """-o reports/x.csv must not rebuild the caller's tree under output/."""
+        import tempfile as _t
+        base = _t.mkdtemp()
+        try:
+            got = managed_path(os.path.join(base, "encrypted"),
+                               os.path.join("laporan", "sub", "bali.csv.enc"))
+            self.assertEqual(os.path.basename(got), "bali.csv.enc")
+            self.assertEqual(os.path.dirname(got),
+                             os.path.join(base, "encrypted"))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_replacing_an_existing_file_is_announced(self):
+        """Funnelling into one directory makes collisions likely, and the file
+        being replaced can be the only copy of that data."""
+        import tempfile as _t
+        fd, path = _t.mkstemp()
+        os.close(fd)
+        try:
+            with io.open(path, "w") as f:
+                f.write("lama")
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                warn_if_replacing(path)
+            self.assertIn("REPLACING", buf.getvalue())
+
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                warn_if_replacing(path + ".tidak-ada")
+            self.assertEqual(buf.getvalue(), "")
+        finally:
+            os.unlink(path)
 
     def test_wrong_password_fails_cleanly(self):
         env = dict(os.environ, SCRAPER_PASSWORD="salah")

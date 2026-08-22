@@ -363,3 +363,33 @@ arms race whose output is never stable enough to depend on.
 `rendered_empty`, where `rendered` means the browser actually added a contact. If
 `rendered` stays under ~5% of rows, the flag costs time for nothing and should be
 left off — the column exists so that is a measurement rather than a guess.
+
+
+---
+
+## Managed output directories
+
+`--encrypt` writes every ciphertext to `output/encrypted/`, and `decrypt.py`
+writes every recovered file to `output/decrypted/`. Both are created on demand
+and `output/` is gitignored, so contact data cannot reach GitHub through a
+forgotten filename.
+
+The constants live in `encrypt.py`, not a new module, because the one-way
+dependency `decrypt.py` -> `encrypt.py` has to stay intact and `main.py` already
+imports from there.
+
+Only the **basename** is used, so `-o laporan/sub/bali.csv` still lands directly
+in the managed directory rather than recreating the caller's tree underneath it.
+
+An explicit `-o` on `encrypt.py` or `decrypt.py` wins. Those flags are a direct
+instruction about one run, and silently redirecting them would be worse than the
+scattering the managed directories exist to prevent.
+
+**Overwrites are announced.** Funnelling every run into one directory makes name
+collisions far more likely than when outputs sat beside their own inputs, and for
+a `.enc` the plaintext is deleted straight after encryption — so the file being
+replaced can be the only copy of that data. `warn_if_replacing()` prints the
+victim's size and timestamp before it goes. Auto-suffixing instead was
+considered and rejected: it never loses data, but it silently accumulates
+`kontak-2`, `kontak-3` files that nobody reconciles, and repeat runs of the same
+command overwriting their own output is the behaviour that existed before.

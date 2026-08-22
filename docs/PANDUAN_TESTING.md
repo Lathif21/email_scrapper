@@ -106,7 +106,7 @@ python main.py uji/uji.txt --skip-search --no-follow-contact    -o uji/t6.csv --
 
 # Enkripsi
 SCRAPER_PASSWORD=uji123 python main.py uji/uji.txt --skip-search --encrypt -o uji/t7.csv --scrape-delay 0
-SCRAPER_PASSWORD=uji123 python decrypt.py uji/t7.csv.enc --preview 3
+SCRAPER_PASSWORD=uji123 python decrypt.py output/encrypted/t7.csv.enc --preview 3
 
 # Audit
 python audit_output.py uji/t1.csv
@@ -119,7 +119,7 @@ python audit_output.py uji/t1.csv
 | `t1` dasar | `sariaterkamboti.com` menghasilkan email + WhatsApp + `address` |
 | `t2` `--emails-only` | Semua baris punya `email_source = found`. **Tidak ada `guessed`.** |
 | `t5` `--guess-email` | Muncul baris `email_source = guessed` (dan hanya di sini) |
-| `t7` enkripsi | File `.csv` plaintext **hilang**, `.csv.enc` ada, decrypt berhasil |
+| `t7` enkripsi | Plaintext `uji/t7.csv` **hilang**; `.enc` ada di `output/encrypted/`; decrypt berhasil dan menulis ke `output/decrypted/` |
 | Semua | Tidak ada kolom yang hilang dibanding `t1` |
 
 Cek otomatis:
@@ -138,7 +138,8 @@ t5 = baca("uji/t5.csv")
 print(f"  {'LULUS' if any(r.get('email_source')=='guessed' for r in t5) else 'PERIKSA'}  --guess-email menghasilkan tebakan")
 
 print(f"  {'LULUS' if not os.path.exists('uji/t7.csv') else 'GAGAL'}  plaintext dihapus setelah --encrypt")
-print(f"  {'LULUS' if os.path.exists('uji/t7.csv.enc') else 'GAGAL'}  file .enc terbuat")
+print(f"  {'LULUS' if os.path.exists('output/encrypted/t7.csv.enc') else 'GAGAL'}  .enc ada di output/encrypted/")
+print(f"  {'LULUS' if os.path.exists('output/decrypted/t7.csv') else 'GAGAL'}  hasil decrypt ada di output/decrypted/")
 PY
 ```
 
