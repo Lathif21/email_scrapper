@@ -11,9 +11,10 @@ safety rules are pure functions and tested directly.
 import unittest
 from unittest import mock
 
-import email_parser
-import render_fetch
-from email_parser import ContactResult, extract_contacts, needs_render, scrape_url
+from harvester import email_parser
+from harvester import render_fetch
+from harvester.email_parser import (ContactResult, extract_contacts,
+                                    needs_render, scrape_url)
 
 
 class FakeRenderer:

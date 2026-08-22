@@ -106,10 +106,10 @@ python main.py uji/uji.txt --skip-search --no-follow-contact    -o uji/t6.csv --
 
 # Enkripsi
 SCRAPER_PASSWORD=uji123 python main.py uji/uji.txt --skip-search --encrypt -o uji/t7.csv --scrape-delay 0
-SCRAPER_PASSWORD=uji123 python decrypt.py output/encrypted/t7.csv.enc --preview 3
+SCRAPER_PASSWORD=uji123 python -m harvester.decrypt output/encrypted/t7.csv.enc --preview 3
 
 # Audit
-python audit_output.py uji/t1.csv
+python -m harvester.audit_output uji/t1.csv
 ```
 
 ### Yang harus diverifikasi, bukan sekadar "tidak error"
@@ -217,9 +217,9 @@ python main.py "hotel bintang 5 Bali kontak" --num-results 20 -o rel_bali.csv
 python main.py "konveksi Bandung kontak"     --num-results 20 -o rel_konveksi.csv
 python main.py "pabrik Cikarang kontak"      --num-results 20 -o rel_pabrik.csv
 
-python audit_output.py rel_bali.csv
-python audit_output.py rel_konveksi.csv
-python audit_output.py rel_pabrik.csv
+python -m harvester.audit_output rel_bali.csv
+python -m harvester.audit_output rel_konveksi.csv
+python -m harvester.audit_output rel_pabrik.csv
 ```
 
 **Uji kritis — query Bali harus menghasilkan Bali:**
@@ -301,7 +301,7 @@ python main.py uji/rusak.txt --skip-search -o uji/rusak.csv --scrape-delay 1
 ## 4.3 Interupsi
 
 ```bash
-python main.py queries_example.txt --batch --num-results 20 -o uji/interupsi.csv
+python main.py config/queries_example.txt --batch --num-results 20 -o uji/interupsi.csv
 # tekan Ctrl-C setelah ~30 detik
 ```
 
@@ -316,7 +316,7 @@ pgrep -f chromium || echo "  LULUS - tidak ada browser tertinggal"
 Sekali saja, untuk melihat perilaku di beban nyata:
 
 ```bash
-python main.py segments_example.json --expand --num-results 20 \
+python main.py config/segments_example.json --expand --num-results 20 \
   --save-yield yield.csv --credit-budget 300 -o batch_besar.csv
 ```
 

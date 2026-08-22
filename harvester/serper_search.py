@@ -31,7 +31,7 @@ Google API, and this category of service faces legal pressure from Google.
 See SEARCH_BACKEND.md.
 
 Usage:
-    from serper_search import SerperSearch
+    from harvester.serper_search import SerperSearch
     scraper = SerperSearch(cache_file=".serper_cache.json")
     results = scraper.search("pabrik konveksi Bandung kontak", num_results=100)
 """
@@ -45,7 +45,7 @@ from typing import Optional
 
 import requests
 
-from secure_files import secure_file
+from .secure_files import secure_file
 
 try:
     from dotenv import load_dotenv
@@ -319,7 +319,7 @@ class SerperSearch:
     def _search_resumable(self, query: str, num_results: int,
                           resume: dict) -> list:
         """Collect `num_results` URLs this query has not returned before."""
-        import search_state as st
+        from . import search_state as st
 
         db_path = resume["db_path"]
         key = resume["key"]
@@ -420,7 +420,7 @@ class SerperSearch:
         for i, query in enumerate(queries, 1):
             resume_state = None
             if resume_db:
-                import search_state as st
+                from . import search_state as st
                 typed = base_queries.get(query, query)
                 key = st.make_key(typed, "serper")
                 resume_state = {
@@ -457,7 +457,7 @@ class SerperSearch:
 def main():
     """Standalone CLI, mirroring google_search_scrapper.py's shape."""
     import argparse
-    import google_search_scrapper as gss
+    from . import google_search_scrapper as gss
 
     parser = argparse.ArgumentParser(
         description="Search via Serper.dev and export the results.")

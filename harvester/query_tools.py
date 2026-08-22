@@ -21,16 +21,24 @@ disappointing, and do not grow it automatically from run output — that drops
 legitimate sites too easily.
 
 Usage:
-    from query_tools import load_blocklist, filter_blocked, add_negative_operators
-    blocked = load_blocklist("blocklist.txt")
+    from harvester.query_tools import (load_blocklist, filter_blocked,
+                                       add_negative_operators)
+    blocked = load_blocklist(DEFAULT_BLOCKLIST_FILE)
     kept, dropped, counts = filter_blocked(results, blocked)
 """
 
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 
-DEFAULT_BLOCKLIST_FILE = "blocklist.txt"
+# Config lives in config/ beside the package, and the defaults are resolved
+# from the package's own location rather than the working directory — so
+# `python /path/to/repo/main.py` works from anywhere, not only from the repo
+# root. An explicit --blocklist PATH still wins.
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+DEFAULT_BLOCKLIST_FILE = str(CONFIG_DIR / "blocklist.txt")
+DEFAULT_SEGMENTS_FILE = str(CONFIG_DIR / "segments_example.json")
 
 # Cap on negative operators per query. More than this and result quality drops:
 # the engine has less room for the terms that actually matter.

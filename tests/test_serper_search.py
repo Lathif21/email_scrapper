@@ -17,9 +17,9 @@ from unittest import mock
 
 import requests
 
-import google_search_scrapper as gss
-import serper_search
-from serper_search import (
+from harvester import google_search_scrapper as gss
+from harvester import serper_search
+from harvester.serper_search import (
     SerperAuthError,
     SerperCreditsExhausted,
     SerperSearch,

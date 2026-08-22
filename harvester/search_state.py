@@ -24,7 +24,7 @@ Nothing here raises because the file does not exist yet — no file simply means
 nothing has been collected.
 
 Usage:
-    import search_state as st
+    from harvester import search_state as st
     key = st.make_key("hotel Bali kontak", "serper")
     seen = st.get_seen_urls(".search_state.db", key)
 """
@@ -34,7 +34,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 
-from secure_files import secure_file
+from .secure_files import secure_file
 
 
 DEFAULT_STATE_DB = ".search_state.db"

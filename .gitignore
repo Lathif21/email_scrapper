@@ -4,7 +4,7 @@
 !.env.example
 
 # Scrape outputs (contact data — keep it off GitHub)
-# main.py --encrypt writes here, decrypt.py writes to output/decrypted/.
+# main.py --encrypt writes here; harvester/decrypt.py writes to output/decrypted/.
 output/
 *.csv
 *.json

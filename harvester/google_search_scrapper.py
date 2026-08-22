@@ -55,7 +55,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from secure_files import secure_file
+from .secure_files import secure_file
 
 
 HEADERS = {

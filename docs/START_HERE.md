@@ -33,7 +33,7 @@ Kerjakan berurutan. Setiap task punya syarat masuk dan kriteria selesai yang jel
 | 05 | [`05_resumable_search.md`](05_resumable_search.md) | SELESAI (`81cf1bb`) | Rp 0 |
 | 06 | [`06_playwright_render.md`](06_playwright_render.md) | SELESAI — tapi terpicu 0% | Rp 0 (dependensi opsional) |
 | 07 | [`07_reliabilitas_output.md`](07_reliabilitas_output.md) | SELESAI | Rp 0 |
-| 08 | [`08_restrukturisasi.md`](08_restrukturisasi.md) | belum dikerjakan | Rp 0 |
+| 08 | [`08_restrukturisasi.md`](08_restrukturisasi.md) | SELESAI | Rp 0 |
 
 Di luar task: satu commit perbaikan (`008a09f`) menangani deteksi halaman
 bot-check, pembacaan JSON-LD dan `tel:`, serta kegagalan senyap saat `--encrypt`
@@ -153,33 +153,60 @@ Berlaku untuk setiap perubahan kode di repo ini. Setiap task file mengulang ini 
 ## Struktur repo
 
 ```
-README.md                  <- cara pakai, flag, format output
-SEARCH_BACKEND.md          <- setup Serper, model kredit, batas akun free
-blocklist.txt              <- domain agregator
-segments_example.json      <- template fan-out untuk --expand
+main.py                      <- entry point, orkestrasi 3 tahap
+README.md                    <- cara pakai, flag, format output
+requirements.txt
+.env.example                 <- SCRAPER_PASSWORD, SERPER_API_KEY
+
+harvester/                   <- semua kode produksi, satu paket datar
+  serper_search.py           <- stage 1 (default)
+  google_search_scrapper.py  <- stage 1 fallback, hasilnya salah
+  email_parser.py            <- stage 2
+  render_fetch.py            <- fallback Playwright untuk halaman JS
+  query_tools.py             <- blocklist, operator negatif, fan-out, path config/
+  search_state.py            <- state resume (SQLite)
+  audit_output.py            <- ukur kualitas CSV
+  encrypt.py / decrypt.py    <- stage 3
+  secure_files.py            <- chmod 0600/0700 untuk file berisi data kontak
+
+tests/                       <- python -m unittest discover -s tests -t .
+  test_email_parser.py   test_serper_search.py
+  test_query_tools.py    test_search_state.py
+  test_render_fetch.py   test_decrypt.py
+
+config/
+  blocklist.txt              <- domain agregator
+  queries_example.txt        <- template daftar query untuk --batch
+  segments_example.json      <- template fan-out untuk --expand
+
 docs/
-  START_HERE.md            <- file ini
-  ARCHITECTURE.md          <- keputusan desain + alasannya
-  COMPLIANCE.md            <- UU PDP, kebijakan WhatsApp
-  01_FIX_data_quality.md   <- SELESAI
-  02_MIGRASI_serper.md     <- SELESAI
-  03_QUERY_quality.md      <- SELESAI
+  START_HERE.md              <- file ini
+  ARCHITECTURE.md            <- keputusan desain + alasannya
+  COMPLIANCE.md              <- UU PDP, kebijakan WhatsApp
+  PANDUAN_TESTING.md         <- empat tingkat pengujian
+  01_FIX_data_quality.md     <- SELESAI
+  02_MIGRASI_serper.md       <- SELESAI
+  03_QUERY_quality.md        <- SELESAI
   04_audit_and_extraction.md <- SELESAI
-  05_resumable_search.md   <- SELESAI
-  06_playwright_render.md  <- SELESAI
-  07_reliabilitas_output.md <- SELESAI
-  08_restrukturisasi.md    <- belum dikerjakan
+  05_resumable_search.md     <- SELESAI
+  06_playwright_render.md    <- SELESAI
+  07_reliabilitas_output.md  <- SELESAI
+  08_restrukturisasi.md      <- SELESAI
+
 archive/
-  README.md                <- daftar file mati + alasannya
-main.py                    <- orkestrasi 3 tahap
-serper_search.py           <- stage 1 (default)
-google_search_scrapper.py  <- stage 1 fallback, hasilnya salah
-email_parser.py            <- stage 2
-secure_files.py            <- chmod 0600/0700 untuk semua file berisi data kontak
-query_tools.py             <- blocklist, operator negatif, fan-out
-search_state.py            <- state resume (SQLite)
-audit_output.py            <- ukur kualitas CSV
-encrypt.py / decrypt.py    <- stage 3
-test_email_parser.py  test_serper_search.py
-test_query_tools.py   test_search_state.py
+  README.md                  <- daftar file mati + alasannya
+  SEARCH_BACKEND.md          <- setup Serper, model kredit, batas akun free
 ```
+
+**Cara menjalankan.** `main.py` tetap `python main.py`. Modul yang punya CLI
+sendiri dijalankan sebagai modul, karena itulah yang membuat import relatif di
+dalam paket tetap bekerja:
+
+```bash
+python main.py "hotel bintang 5 Bali" -o kontak.csv
+python -m harvester.decrypt output/encrypted/kontak.csv.enc --preview 20
+python -m harvester.audit_output kontak.csv
+```
+
+Path default di `config/` diselesaikan dari lokasi paket, bukan direktori kerja,
+jadi `python /path/ke/repo/main.py` bekerja dari mana pun.

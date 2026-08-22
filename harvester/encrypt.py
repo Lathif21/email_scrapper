@@ -15,9 +15,9 @@ it is stored in the file itself so you never have to track it separately. Only
 the password is secret.
 
 CLI usage:
-    python encrypt.py contacts.csv                    # -> contacts.csv.enc
-    python encrypt.py contacts.csv -o secret.bin
-    python encrypt.py contacts.csv --keep             # keep the plaintext file
+    python -m harvester.encrypt contacts.csv          # -> contacts.csv.enc
+    python -m harvester.encrypt contacts.csv -o secret.bin
+    python -m harvester.encrypt contacts.csv --keep   # keep the plaintext
 
 Password resolution order:
     1. --password argument (avoid: lands in shell history)
@@ -35,7 +35,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from secure_files import secure_dir, secure_file
+from .secure_files import secure_dir, secure_file
 
 try:
     from dotenv import load_dotenv
@@ -192,7 +192,7 @@ def main():
     print(f"Encrypted -> '{output_path}'")
     if not args.keep:
         print(f"Plaintext '{args.input_file}' removed.")
-    print(f"Decrypt with: python decrypt.py {output_path}")
+    print(f"Decrypt with: python -m harvester.decrypt {output_path}")
 
 
 if __name__ == "__main__":

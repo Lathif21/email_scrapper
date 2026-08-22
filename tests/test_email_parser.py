@@ -26,9 +26,9 @@ from unittest import mock
 
 import requests
 
-import email_parser
-import secure_files
-from email_parser import (
+from harvester import email_parser
+from harvester import secure_files
+from harvester.email_parser import (
     ContactResult,
     clean_emails,
     extract_contacts,
@@ -1228,13 +1228,13 @@ class SecureFileTests(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_write_csv_restricts_the_file_it_wrote(self):
-        with mock.patch("secure_files.os.chmod") as chmod:
+        with mock.patch("harvester.secure_files.os.chmod") as chmod:
             written = email_parser.write_csv(self.ROWS, self.target)
         chmod.assert_any_call(written, secure_files.FILE_MODE)
 
     def test_a_checkpoint_file_is_restricted_too(self):
         writer = email_parser.make_checkpoint_writer(self.target, verbose=False)
-        with mock.patch("secure_files.os.chmod") as chmod:
+        with mock.patch("harvester.secure_files.os.chmod") as chmod:
             writer([ContactResult(url="https://maju.co.id/",
                                   emails={"sales@maju.co.id"})])
         chmod.assert_any_call(email_parser.partial_path(self.target),
@@ -1242,7 +1242,7 @@ class SecureFileTests(unittest.TestCase):
 
     def test_a_refused_chmod_is_not_an_error(self):
         """Windows chmod is mostly a no-op, so failure has to be survivable."""
-        with mock.patch("secure_files.os.chmod",
+        with mock.patch("harvester.secure_files.os.chmod",
                         side_effect=OSError(1, "Operation not permitted")):
             secure_files.secure_file(self.target)
             secure_files.secure_dir(self.dir)

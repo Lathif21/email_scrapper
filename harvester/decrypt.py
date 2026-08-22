@@ -7,13 +7,13 @@ drift apart. Fernet is authenticated encryption: a wrong password or a tampered
 file fails loudly instead of returning garbage.
 
 CLI usage:
-    python decrypt.py contacts.csv.enc                 # -> contacts.csv
-    python decrypt.py contacts.csv.enc -o out.csv
-    python decrypt.py contacts.csv.enc --stdout        # print, don't write to disk
-    python decrypt.py contacts.csv.enc --preview 10    # first 10 lines only
+    python -m harvester.decrypt contacts.csv.enc            # -> contacts.csv
+    python -m harvester.decrypt contacts.csv.enc -o out.csv
+    python -m harvester.decrypt contacts.csv.enc --stdout   # print, not to disk
+    python -m harvester.decrypt contacts.csv.enc --preview 10  # first 10 lines
 
 Dashboard integration:
-    from decrypt import decrypt_bytes
+    from harvester.decrypt import decrypt_bytes
     rows = decrypt_bytes(open("contacts.csv.enc","rb").read(), password).decode()
 
 Password resolution order:
@@ -30,9 +30,9 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from secure_files import secure_file
-from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, SALT_SIZE, derive_key,
-                     managed_path, resolve_password, warn_if_replacing)
+from .secure_files import secure_file
+from .encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, SALT_SIZE, derive_key,
+                      managed_path, resolve_password, warn_if_replacing)
 
 
 def _find_encrypted():
@@ -92,7 +92,8 @@ def decrypt_bytes(blob: bytes, password: str) -> bytes:
                 f"{hint}\n"
                 "  decrypt.py only reads files produced by encrypt.py or "
                 "'main.py --encrypt' — normally named '<something>.csv.enc'.\n"
-                "  Run 'python decrypt.py --list' to see the encrypted files here."
+                "  Run 'python -m harvester.decrypt --list' to see the encrypted "
+                "files here."
             )
         raise ValueError(
             "Decryption failed: wrong password, or the file is corrupted / tampered with.\n"
@@ -153,7 +154,8 @@ def main():
             print("Encrypted files:")
             for path in found:
                 print(f"    {path}    ({path.stat().st_size:,} bytes)")
-            print(f"\nRead one with: python decrypt.py {found[0]} --preview 20")
+            print(f"\nRead one with: python -m harvester.decrypt "
+                  f"{found[0]} --preview 20")
         return
 
     if not args.input_file:

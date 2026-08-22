@@ -5,8 +5,8 @@ audit_output.py — measure the quality of a contacts CSV.
 Fills in the metrics table in START_HERE.md. No network access, and the input
 file is never modified.
 
-    python audit_output.py contacts.csv
-    python audit_output.py contacts.csv bali.csv        # several at once
+    python -m harvester.audit_output contacts.csv
+    python -m harvester.audit_output contacts.csv bali.csv   # several at once
 
 Metrics:
     Relevan             a location named in the query MUST appear in `company`
@@ -42,7 +42,8 @@ import re
 import sys
 from collections import Counter
 
-from query_tools import DEFAULT_BLOCKLIST_FILE, host_of, is_blocked, load_blocklist
+from .query_tools import (DEFAULT_BLOCKLIST_FILE, DEFAULT_SEGMENTS_FILE,
+                          host_of, is_blocked, load_blocklist)
 
 
 # Words that state intent rather than target. Ignored entirely: a URL
@@ -78,7 +79,7 @@ KNOWN_LOCATIONS = {
 }
 
 
-def load_location_vocabulary(path: str = "segments_example.json") -> set:
+def load_location_vocabulary(path: str = DEFAULT_SEGMENTS_FILE) -> set:
     """KNOWN_LOCATIONS plus any cities listed in a fan-out config.
 
     The config is where the user names the places they actually target, so it

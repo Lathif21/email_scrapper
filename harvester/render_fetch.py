@@ -19,7 +19,7 @@ Playwright is an optional dependency. Importing this module without it
 installed is fine; only using --render requires it.
 
 Usage:
-    from render_fetch import Renderer
+    from harvester.render_fetch import Renderer
     with Renderer() as r:
         html, error = r.fetch("https://example.com/kontak")
 """

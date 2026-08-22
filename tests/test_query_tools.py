@@ -13,8 +13,10 @@ import os
 import tempfile
 import unittest
 
-import audit_output
-from query_tools import (
+from harvester import audit_output
+from harvester.query_tools import (
+    DEFAULT_BLOCKLIST_FILE,
+    DEFAULT_SEGMENTS_FILE,
     MAX_NEGATIVE_OPS,
     PRIORITY_NEGATIVE_DOMAINS,
     YieldTracker,
@@ -96,7 +98,7 @@ class BlocklistFileTests(unittest.TestCase):
         self.assertEqual(load_blocklist(self.path), {"booking.com"})
 
     def test_shipped_blocklist_is_loadable_and_sane(self):
-        blocklist = load_blocklist("blocklist.txt")
+        blocklist = load_blocklist(DEFAULT_BLOCKLIST_FILE)
         self.assertGreater(len(blocklist), 20)
         for domain in ("booking.com", "instagram.com", "scribd.com"):
             self.assertIn(domain, blocklist)
@@ -254,7 +256,7 @@ class ExpandQueriesTests(unittest.TestCase):
         self.assertEqual(expand_queries(config), ["a b"])
 
     def test_shipped_example_config_is_valid(self):
-        config = load_expansion_config("segments_example.json")
+        config = load_expansion_config(DEFAULT_SEGMENTS_FILE)
         queries = expand_queries(config)
         self.assertEqual(len(queries), 63)   # 3 x 3 x 7
         self.assertTrue(all("{" not in q for q in queries))
@@ -512,7 +514,7 @@ class AuditTests(unittest.TestCase):
 
     def test_the_source_no_longer_produces_that_string(self):
         """The hole above is closed upstream, in email_parser."""
-        import email_parser
+        from harvester import email_parser
         self.assertEqual(email_parser.normalize_phone("97125019000"),
                          "+97125019000")
         self.assertFalse(

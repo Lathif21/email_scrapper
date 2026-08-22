@@ -35,7 +35,7 @@ walkthrough below covers both.
 pip install -r requirements.txt                                   # once
 python main.py "hotel Bandung kontak" --num-results 20 --dry-run  # preview URLs
 python main.py "hotel Bandung kontak" --num-results 20 --encrypt  # -> output/encrypted/
-python decrypt.py output/encrypted/contacts.csv.enc --preview 20   # read it back
+python -m harvester.decrypt output/encrypted/contacts.csv.enc --preview 20   # read it back
 ```
 
 Everything below is the same four steps, explained.
@@ -116,7 +116,7 @@ All three stages run, and the last two lines tell you exactly what to do next:
 ```
 Wrote 7 row(s) -> 'contacts.csv'
 Encrypted -> 'output\encrypted\contacts.csv.enc' (plaintext removed)
-Decrypt with: python decrypt.py output\encrypted\contacts.csv.enc
+Decrypt with: python -m harvester.decrypt output\encrypted\contacts.csv.enc
 ```
 
 `--encrypt` **deletes the plaintext `contacts.csv`** after encrypting it, so the
@@ -158,7 +158,7 @@ your chosen name back.
 ### 5. Read the results back
 
 ```bash
-python decrypt.py output/encrypted/contacts.csv.enc --preview 20
+python -m harvester.decrypt output/encrypted/contacts.csv.enc --preview 20
 ```
 
 ```
@@ -167,19 +167,19 @@ email,reservation.bdg@el-hotels.com,high,https://bandung.el-hotels.com/,hotel Ba
 whatsapp,+6281212222024,high,https://bandung.el-hotels.com/,hotel Bandung kontak
 ```
 
-Forgot the filename? `python decrypt.py --list` shows every `.enc` file in
+Forgot the filename? `python -m harvester.decrypt --list` shows every `.enc` file in
 `output/encrypted/` — plus any left in the current folder from before outputs
 were funnelled there — and prints the exact command to open one.
 
 | I want to… | Command |
 |---|---|
-| Peek at the first 20 lines | `python decrypt.py output/encrypted/contacts.csv.enc --preview 20` |
-| Print the whole thing | `python decrypt.py output/encrypted/contacts.csv.enc --stdout` |
-| Get a normal CSV back on disk | `python decrypt.py output/encrypted/contacts.csv.enc` -> `output/decrypted/` |
-| Write it somewhere specific | `python decrypt.py output/encrypted/contacts.csv.enc -o final.csv` |
-| See which files I can open | `python decrypt.py --list` |
+| Peek at the first 20 lines | `python -m harvester.decrypt output/encrypted/contacts.csv.enc --preview 20` |
+| Print the whole thing | `python -m harvester.decrypt output/encrypted/contacts.csv.enc --stdout` |
+| Get a normal CSV back on disk | `python -m harvester.decrypt output/encrypted/contacts.csv.enc` -> `output/decrypted/` |
+| Write it somewhere specific | `python -m harvester.decrypt output/encrypted/contacts.csv.enc -o final.csv` |
+| See which files I can open | `python -m harvester.decrypt --list` |
 
-Plain `python decrypt.py output/encrypted/contacts.csv.enc` (no flags) writes
+Plain `python -m harvester.decrypt output/encrypted/contacts.csv.enc` (no flags) writes
 `output/decrypted/contacts.csv` — that's the one to use before opening it in
 Excel.
 
@@ -209,14 +209,25 @@ python main.py queries.txt --batch --num-results 20 --encrypt -o hospitality.csv
 
 ## The modules
 
+Production code lives in the `harvester/` package; `main.py` stays at the repo
+root. A module with its own CLI is run with `python -m`, which is what keeps its
+relative imports working.
+
 | File | Role | Standalone CLI |
 |---|---|---|
-| `serper_search.py` | Stage 1 (default) — turns queries into URLs via the Serper.dev API. One call per query, credit accounting, caching. | Yes |
-| `google_search_scrapper.py` | Stage 1 fallback — scraped Bing/Google. Kept for reference; returns the wrong data, see the reality check below. | Yes |
-| `email_parser.py` | Stage 2 — fetches pages, extracts contacts, respects `robots.txt`. | Yes |
-| `encrypt.py` | Stage 3 — password-based encryption. Owns the key-derivation function, loads `.env`. | Yes |
-| `decrypt.py` | Reads encrypted output back. Imports the KDF from `encrypt.py`. | Yes |
-| `main.py` | Orchestrates 1 -> 2 -> 3 with stage-skipping flags. | Yes |
+| `harvester/serper_search.py` | Stage 1 (default) — turns queries into URLs via the Serper.dev API. One call per query, credit accounting, caching. | `python -m harvester.serper_search` |
+| `harvester/google_search_scrapper.py` | Stage 1 fallback — scraped Bing/Google. Kept for reference; returns the wrong data, see the reality check below. | `python -m harvester.google_search_scrapper` |
+| `harvester/email_parser.py` | Stage 2 — fetches pages, extracts contacts, respects `robots.txt`. | `python -m harvester.email_parser` |
+| `harvester/query_tools.py` | Blocklist, negative operators, `--expand` fan-out. Owns the `config/` path defaults. | — |
+| `harvester/search_state.py` | Resume state for stage 1 and `--skip-scraped` (SQLite). | — |
+| `harvester/render_fetch.py` | Playwright fallback for JS-built pages (`--render`). | — |
+| `harvester/encrypt.py` | Stage 3 — password-based encryption. Owns the key-derivation function, loads `.env`. | `python -m harvester.encrypt` |
+| `harvester/decrypt.py` | Reads encrypted output back. Imports the KDF from `encrypt.py`. | `python -m harvester.decrypt` |
+| `harvester/audit_output.py` | Measures the quality of a contacts CSV. | `python -m harvester.audit_output` |
+| `harvester/secure_files.py` | `chmod` helpers — every file holding contact data is owner-only. | — |
+| `main.py` | Orchestrates 1 -> 2 -> 3 with stage-skipping flags. | `python main.py` |
+| `config/` | `blocklist.txt`, `queries_example.txt`, `segments_example.json`. Resolved from the package location, so any working directory works. | — |
+| `tests/` | `python -m unittest discover -s tests -t .` | — |
 | `.env` / `.env.example` | Secrets (`SCRAPER_PASSWORD`, `SERPER_API_KEY`). `.env` is gitignored. | — |
 
 ---
@@ -336,7 +347,7 @@ explicitly stating the number is reachable.
 
 **Query quality** — the biggest lever on output quality
 ```bash
---blocklist blocklist.txt # aggregator domains to drop before fetching (default)
+--blocklist config/blocklist.txt   # aggregator domains dropped before fetching (default)
 --no-blocklist            # don't filter aggregators at all
 --no-negative-ops         # don't add -site: operators to queries
 --expand segments.json    # fan out templates x segments x cities into many queries
@@ -674,7 +685,7 @@ If you would rather have a smaller, cleaner set, use `--no-negative-ops`.
 
 One deep query cannot produce a thousand contacts — engines cap the depth. Many
 narrow queries can. `--expand` takes a JSON config (see
-[segments_example.json](segments_example.json)) and expands
+[config/segments_example.json](config/segments_example.json)) and expands
 templates × segments × cities:
 
 ```bash
@@ -687,7 +698,7 @@ segment is exhausted and more queries of the same shape only buy overlap.
 ### Measuring
 
 ```bash
-python audit_output.py contacts.csv
+python -m harvester.audit_output contacts.csv
 ```
 
 Relevance is a heuristic — it cannot tell a real hotel page from an article

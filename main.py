@@ -112,12 +112,13 @@ import os
 import sys
 import time
 
-import email_parser
-import google_search_scrapper as searcher
-import query_tools
-import search_state
-from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file, managed_path,
-                     resolve_password, warn_if_replacing)
+from harvester import email_parser
+from harvester import google_search_scrapper as searcher
+from harvester import query_tools
+from harvester import search_state
+from harvester.encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file,
+                               managed_path, resolve_password,
+                               warn_if_replacing)
 
 
 BANNER = r"""
@@ -241,8 +242,8 @@ def stage_search(args) -> tuple:
 
     if args.engine == "serper":
         # Imported inside the branch so Bing users need no credentials.
-        from serper_search import (SerperSearch, SerperAuthError,
-                                   estimate_credits)
+        from harvester.serper_search import (SerperSearch, SerperAuthError,
+                                             estimate_credits)
         cache_file = ".serper_cache.json" if args.cache else None
         try:
             scraper = SerperSearch(cache_file=cache_file)
@@ -369,7 +370,7 @@ def stage_parse(pairs: list, args) -> list:
 
     renderer = None
     if args.render:
-        from render_fetch import Renderer, RendererUnavailable
+        from harvester.render_fetch import Renderer, RendererUnavailable
         try:
             renderer = Renderer(headless=not args.show_browser,
                                 timeout=args.render_timeout)
@@ -511,7 +512,7 @@ def stage_output(rows: list, args) -> None:
         print(f"Plaintext '{written}' could NOT be removed — see the warning above.")
     else:
         print(f"Encrypted -> '{encrypted_path}' (plaintext removed)")
-    print(f"Decrypt with: python decrypt.py {encrypted_path}")
+    print(f"Decrypt with: python -m harvester.decrypt {encrypted_path}")
 
 
 def main():

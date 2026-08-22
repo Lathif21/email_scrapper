@@ -38,11 +38,11 @@ Two defaults worth knowing:
       --ignore-free-mail to filter them out.
 
 CLI usage (standalone, from a URL list):
-    python email_parser.py urls.txt -o contacts.csv
-    python email_parser.py urls.txt --delay 3 --emails-only
+    python -m harvester.email_parser urls.txt -o contacts.csv
+    python -m harvester.email_parser urls.txt --delay 3 --emails-only
 
 Library usage (how main.py calls it):
-    from email_parser import scrape_url, ContactResult
+    from harvester.email_parser import scrape_url, ContactResult
     result = scrape_url("https://example.com/contact")
     print(result.emails, result.whatsapp, result.phones)
 """
@@ -64,7 +64,7 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup
 
-from secure_files import secure_file
+from .secure_files import secure_file
 
 # ---------------------------------------------------------------- patterns
 

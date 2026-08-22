@@ -20,10 +20,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-import secure_files
-from decrypt import decrypt_file
-from encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file, managed_path,
-                     warn_if_replacing)
+from harvester import secure_files
+from harvester.decrypt import decrypt_file
+from harvester.encrypt import (DECRYPTED_DIR, ENCRYPTED_DIR, encrypt_file,
+                               managed_path, warn_if_replacing)
 
 
 PASSWORD = "uji123"
@@ -57,7 +57,7 @@ class DecryptCliTests(unittest.TestCase):
         if io_encoding:
             env["PYTHONIOENCODING"] = io_encoding
         return subprocess.run(
-            [sys.executable, "decrypt.py", self.enc, *args],
+            [sys.executable, "-m", "harvester.decrypt", self.enc, *args],
             capture_output=True, env=env, timeout=120,
         )
 
@@ -109,9 +109,11 @@ class DecryptCliTests(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.dir)
         try:
-            env = dict(os.environ, SCRAPER_PASSWORD=PASSWORD)
+            # Run as a module from a different directory: PYTHONPATH points at
+            # the repo root so `harvester` is importable from anywhere.
+            env = dict(os.environ, SCRAPER_PASSWORD=PASSWORD, PYTHONPATH=cwd)
             proc = subprocess.run(
-                [sys.executable, os.path.join(cwd, "decrypt.py"),
+                [sys.executable, "-m", "harvester.decrypt",
                  os.path.basename(self.enc)],
                 capture_output=True, env=env, timeout=120)
             self.assertEqual(proc.returncode, 0,
@@ -170,7 +172,8 @@ class DecryptCliTests(unittest.TestCase):
     def test_wrong_password_fails_cleanly(self):
         env = dict(os.environ, SCRAPER_PASSWORD="salah")
         proc = subprocess.run(
-            [sys.executable, "decrypt.py", self.enc, "--preview", "2"],
+            [sys.executable, "-m", "harvester.decrypt", self.enc,
+             "--preview", "2"],
             capture_output=True, env=env, timeout=120)
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn(b"Traceback", proc.stderr)
@@ -190,7 +193,7 @@ class OutputPermissionTests(unittest.TestCase):
 
     def test_the_ciphertext_is_restricted(self):
         out = os.path.join(self.dir, "a.csv.enc")
-        with mock.patch("secure_files.os.chmod") as chmod:
+        with mock.patch("harvester.secure_files.os.chmod") as chmod:
             encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
         chmod.assert_any_call(out, secure_files.FILE_MODE)
 
@@ -198,12 +201,12 @@ class OutputPermissionTests(unittest.TestCase):
         out = os.path.join(self.dir, "b.csv.enc")
         encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
         recovered = os.path.join(self.dir, "b.csv")
-        with mock.patch("secure_files.os.chmod") as chmod:
+        with mock.patch("harvester.secure_files.os.chmod") as chmod:
             decrypt_file(out, recovered, PASSWORD)
         chmod.assert_any_call(recovered, secure_files.FILE_MODE)
 
     def test_the_managed_directories_are_restricted(self):
-        with mock.patch("secure_files.os.chmod") as chmod:
+        with mock.patch("harvester.secure_files.os.chmod") as chmod:
             managed_path(os.path.join(self.dir, "output", "encrypted"), "x.csv")
         chmod.assert_any_call(os.path.join(self.dir, "output", "encrypted"),
                               secure_files.DIR_MODE)
@@ -212,7 +215,7 @@ class OutputPermissionTests(unittest.TestCase):
 
     def test_a_refused_chmod_does_not_break_encryption(self):
         out = os.path.join(self.dir, "c.csv.enc")
-        with mock.patch("secure_files.os.chmod",
+        with mock.patch("harvester.secure_files.os.chmod",
                         side_effect=OSError(1, "Operation not permitted")):
             encrypt_file(self.plain, out, PASSWORD, remove_plaintext=False)
         self.assertTrue(os.path.exists(out))

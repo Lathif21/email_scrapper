@@ -14,8 +14,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-import search_state as st
-from serper_search import SerperCreditsExhausted, SerperSearch
+from harvester import search_state as st
+from harvester.serper_search import SerperCreditsExhausted, SerperSearch
 
 
 API_KEY = "test-key-0000000000000000000000000000"

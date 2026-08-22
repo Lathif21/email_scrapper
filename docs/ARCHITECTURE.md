@@ -10,17 +10,30 @@ Each module owns one stage and exposes a small importable surface. `main.py` is
 the only file that knows about all of them; nothing else imports `main`.
 
 ```
-main.py
+main.py                                          (repo root, not in the package)
   ├── google_search_scrapper.SearchScraper.search_many()  -> [result dicts]
   ├── email_parser.scrape_urls_parallel()                 -> [ContactResult]
   ├── email_parser.results_to_rows() / write_csv()        -> CSV
   └── encrypt.encrypt_file()                              -> .enc
 
-decrypt.py
-  └── encrypt.derive_key(), encrypt.SALT_SIZE            (shared KDF)
+harvester/decrypt.py
+  └── .encrypt.derive_key(), .encrypt.SALT_SIZE          (shared KDF)
 
-secure_files.py   (imported by all of the above; imports only `os`)
+harvester/secure_files.py  (imported by all of the above; imports only `os`)
 ```
+
+Everything except `main.py` lives in the flat `harvester/` package and refers to
+its siblings with explicit relative imports (`from .encrypt import derive_key`).
+The package is flat on purpose: ten modules do not need `core/` or `utils/`, and
+a `utils/` always ends up as the drawer nobody opens. `main.py` stays at the root
+because it is the entry point users type, and `python main.py` should keep
+working. Modules with their own CLI are run as `python -m harvester.<module>` —
+running the file by path would break the relative imports.
+
+Config files sit in `config/` and their defaults are resolved from the package's
+own location (`query_tools.CONFIG_DIR`), never from the working directory, so
+`python /path/to/repo/main.py` finds `blocklist.txt` from anywhere. An explicit
+`--blocklist PATH` still wins.
 
 **Dependency direction is one-way.** `decrypt.py` imports from `encrypt.py`,
 never the reverse. The key derivation function is defined exactly once, so the

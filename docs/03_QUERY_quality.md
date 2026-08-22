@@ -166,7 +166,7 @@ Simpan ke `query_yield.csv` kalau `--save-yield` dipakai. Ini yang memberi tahu 
 Buat `audit_output.py` di root. Dipakai untuk mengisi tabel metrik di `START_HERE.md`.
 
 ```
-python audit_output.py contacts.csv
+python -m harvester.audit_output contacts.csv
 ```
 
 Keluaran:
