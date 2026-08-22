@@ -16,8 +16,7 @@ Empat tingkat, dari yang paling murah ke paling mahal. Kerjakan berurutan — ka
 **Dijalankan Claude Code. Nol kredit, nol jaringan.**
 
 ```bash
-python -m unittest test_email_parser test_query_tools test_serper_search \
-                  test_search_state test_render_fetch test_decrypt
+python -m unittest discover -s tests -t .
 ```
 
 Baseline saat ini: **299 test lolos** (plus 2 dilewati di Windows — keduanya

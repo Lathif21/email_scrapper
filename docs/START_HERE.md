@@ -42,7 +42,7 @@ tidak bisa menghapus plaintext.
 **299 test lolos** (2 dilewati di Windows). Jalankan:
 
 ```bash
-python -m unittest test_email_parser test_serper_search test_query_tools test_search_state
+python -m unittest discover -s tests -t .
 ```
 
 ---
