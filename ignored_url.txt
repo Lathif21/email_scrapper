@@ -1,3 +1,0 @@
-# URL list for --skip-search mode (one per line, # for comments)
-https://example.com/
-https://mredeka.com/
