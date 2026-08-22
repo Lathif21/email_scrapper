@@ -365,11 +365,24 @@ class AuditTests(unittest.TestCase):
     def test_missing_file_does_not_raise(self):
         self.assertEqual(audit_output.audit("no-such-file-98765.csv", set()), {})
 
-    def test_relevance_matches_on_query_nouns(self):
+    def test_relevance_requires_the_location_not_just_the_topic(self):
+        """Task 04 Part A: matching only the topic word is not relevance.
+
+        Both rows are konveksi pages, but the query named Bandung and neither
+        mentions it. Under the old summing heuristic the first row scored as
+        relevant; that is the bug that reported an 0%-correct result set as 75%.
+        """
         self.write(
             "Konveksi Maju,,,https://konveksi-maju.co.id/,,,,,"
             "pabrik konveksi Bandung kontak,ok\n"
             "Random Blog,,,https://unrelated.com/,,,,,"
+            "pabrik konveksi Bandung kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["relevant"], 0)
+
+    def test_relevance_counts_when_location_and_topic_both_match(self):
+        self.write(
+            "Konveksi Bandung Jaya,,,https://konveksibandungjaya.id/,,,,,"
             "pabrik konveksi Bandung kontak,ok\n")
         stats = audit_output.audit(self.path, set())
         self.assertEqual(stats["relevant"], 1)
@@ -408,6 +421,110 @@ class AuditTests(unittest.TestCase):
             "C,,,https://c.co.id/,,,,,q,403\n")
         stats = audit_output.audit(self.path, set())
         self.assertEqual(stats["errors"], 2)
+
+    # ---- Task 04 Part A: the metric that was reporting 75% for a 0% result set
+
+    # Faithful to the real bali.csv described in docs/04: query asked for Bali,
+    # every result was Surabaya. The file itself is gone (*.csv is gitignored
+    # and it was deleted), so this reconstructs it from the recorded rows.
+    BALI_ROWS = (
+        "Agoda,,,https://www.agoda.com/id-id/city/surabaya-id.html,,,,,"
+        "hotel bintang 5 Bali kontak,ok\n"
+        "Booking.com,,,https://www.booking.com/city/id/surabaya.id.html,,,,,"
+        "hotel bintang 5 Bali kontak,ok\n"
+        "Traveloka,,,https://www.traveloka.com/id-id/hotel/indonesia/city/surabaya,,,,,"
+        "hotel bintang 5 Bali kontak,ok\n"
+        "Hotel Surabaya Center,,,https://hotelsurabaya.id/,,,,,"
+        "hotel bintang 5 Bali kontak,ok\n"
+    )
+
+    def test_bali_query_answered_with_surabaya_scores_zero(self):
+        self.write(self.BALI_ROWS)
+        stats = audit_output.audit(self.path, set())
+        # Spec requires < 10%; the honest answer is 0.
+        self.assertEqual(stats["relevant"], 0)
+
+    def test_bali_query_answered_with_surabaya_is_all_mismatch(self):
+        self.write(self.BALI_ROWS)
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["located"], 4)
+        self.assertEqual(stats["mismatched"], 4)
+
+    def test_query_without_a_location_is_not_counted_as_mismatch(self):
+        self.write("PT Maju,,,https://ptmaju.co.id/,,,,,pabrik kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["located"], 0)
+        self.assertEqual(stats["mismatched"], 0)
+
+    def test_page_naming_no_location_is_not_a_mismatch(self):
+        """Uninformative is not the same as wrong."""
+        self.write("Hotel Directory,,,https://hotel.co.id/,,,,,"
+                   "hotel bintang 5 Bali kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["mismatched"], 0)
+
+    def test_correct_location_is_relevant_and_not_mismatched(self):
+        self.write("Hotel Bumi Surabaya,,,https://bumisurabaya.com/,,,,,"
+                   "hotel Surabaya kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["relevant"], 1)
+        self.assertEqual(stats["mismatched"], 0)
+
+    def test_intent_words_alone_never_make_a_row_relevant(self):
+        for query in ("kontak", "hubungi kami", "email reservasi"):
+            with self.subTest(query=query):
+                self.write(f"Situs,,,https://example.com/kontak,,,,,{query},ok\n")
+                stats = audit_output.audit(self.path, set())
+                self.assertEqual(stats["relevant"], 0)
+
+    def test_capitalized_token_counts_as_a_location(self):
+        # 'Sidoarjo' is in the vocabulary; 'Wonosobo' is not, but is capitalized.
+        located, topics = audit_output.split_query_terms(
+            "pabrik Wonosobo kontak", audit_output.load_location_vocabulary())
+        self.assertIn("wonosobo", located)
+        self.assertIn("pabrik", topics)
+
+    def test_landline_is_a_valid_number(self):
+        # Hotel reservation lines are landlines; a mobile-only rule called every
+        # one of them invalid, which understated the output.
+        self.assertTrue(audit_output.is_valid_id_landline("+623199251777"))
+        self.assertTrue(audit_output.is_valid_id_landline("+62217658956"))
+        self.assertTrue(audit_output.is_plausible_id_phone("+6281234567890"))
+
+    def test_bad_prefix_is_still_invalid(self):
+        # A US toll-free number (1877...) that normalize_phone() prefixed with
+        # 62: '187' is not an Indonesian area code, so the shape check sees it.
+        self.assertFalse(audit_output.is_plausible_id_phone("+6218779993223"))
+        # The 10-digit offcut from Task 01 stays rejected.
+        self.assertFalse(audit_output.is_plausible_id_phone("+6282783139"))
+
+    def test_mangled_foreign_number_can_be_indistinguishable(self):
+        """Pins a known limit rather than pretending the check is complete.
+
+        wa.me/97125019000 is Abu Dhabi (+971 2 501 9000). normalize_phone()
+        prefixes 62, giving +6297125019000 — and 971 really is an Indonesian
+        (Papua) area code, so by shape alone this is a valid Indonesian
+        landline. No audit-side check can separate the two; the fix belongs in
+        normalize_phone(), which must stop prefixing 62 onto foreign numbers.
+        """
+        self.assertTrue(audit_output.is_plausible_id_phone("+6297125019000"))
+
+    def test_mobile_and_landline_are_reported_separately(self):
+        self.write(
+            "A,,,https://a.co.id/,,+623199251777,,,hotel Surabaya kontak,ok\n"
+            "B,,,https://b.co.id/,,+6281234567890,,,hotel Surabaya kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["valid_numbers"], 2)
+        self.assertEqual(stats["mobiles"], 1)
+        self.assertEqual(stats["landlines"], 1)
+
+    def test_unique_domain_ratio_flags_duplicates(self):
+        self.write(
+            "A,,,https://same.co.id/a,,,,,hotel Surabaya kontak,ok\n"
+            "B,,,https://same.co.id/b,,,,,hotel Surabaya kontak,ok\n"
+            "C,,,https://same.co.id/c,,,,,hotel Surabaya kontak,ok\n")
+        stats = audit_output.audit(self.path, set())
+        self.assertEqual(stats["unique_hosts"], 1)
 
     def test_input_file_is_not_modified(self):
         body = "A,,,https://a.co.id/,,,,,q,ok\n"

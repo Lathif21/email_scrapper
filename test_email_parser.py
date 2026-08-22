@@ -568,6 +568,148 @@ class FollowContactTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- regressions
 
+class ContactBlockTests(unittest.TestCase):
+    """Task 04 Part B — structured extraction is a bonus layer, never a filter."""
+
+    # The éL Hotel footer from the spec, verbatim in shape.
+    EL_HOTEL = """<html><body>
+      <p>Selamat datang di hotel kami di Bandung.</p>
+      <footer><h3>KONTAK</h3>
+        <p>Jl. Merdeka No. 2 Bandung Indonesia 40111</p>
+        <p>Telephone : 62 22-4232286</p>
+        <p>Email : reservation.bdg@el-hotels.com</p>
+      </footer></body></html>"""
+
+    def test_el_hotel_footer_fills_the_block(self):
+        block = email_parser.extract_contact_block(
+            self.EL_HOTEL, "https://bandung.el-hotels.com/")
+        self.assertIsNotNone(block)
+        self.assertEqual(block.email, "reservation.bdg@el-hotels.com")
+        self.assertIn("Jl. Merdeka No. 2", block.address)
+        self.assertIn("40111", block.address)
+        self.assertEqual(block.phone, "+62224232286")
+
+    def test_labelled_landline_survives_the_mobile_check(self):
+        """62 22-4232286 is a Bandung fixed line — a labelled number is trusted."""
+        result = email_parser.ContactResult(url="https://bandung.el-hotels.com/")
+        email_parser._merge_contact_block(
+            result, self.EL_HOTEL, "https://bandung.el-hotels.com/")
+        self.assertIn("+62224232286", result.phones)
+        self.assertIn("+62224232286", result.labeled_phones)
+
+    def test_phone_regex_numbers_are_still_validated(self):
+        """The labelled bypass must not loosen the Task 01 rule."""
+        html = "<html><body><p>Hubungi 082783139 sekarang juga ya</p></body></html>"
+        self.assertEqual(extract_contacts(html, "https://x.co.id/").phones, set())
+
+    def test_scope_is_limited_to_the_anchor(self):
+        html = """<html><body>
+          <p>Email : jauh@bagianlain.co.id</p>
+          <div id="footer-kontak"><p>Email : dekat@kontak.co.id</p></div>
+          </body></html>"""
+        block = email_parser.extract_contact_block(html, "https://x.co.id/")
+        self.assertEqual(block.email, "dekat@kontak.co.id")
+
+    def test_json_ld_wins_over_conflicting_visible_text(self):
+        html = """<html><head><script type="application/ld+json">
+        {"@type":"Hotel","name":"Hotel Resmi","email":"resmi@hotel.co.id",
+         "telephone":"+62311234567",
+         "address":{"@type":"PostalAddress","streetAddress":"Jl. Resmi 1",
+                    "addressLocality":"Surabaya","postalCode":"60111"}}
+        </script></head><body>
+          <h3>KONTAK</h3><p>Email : salah@lain.co.id</p>
+        </body></html>"""
+        block = email_parser.extract_contact_block(html, "https://hotel.co.id/")
+        self.assertEqual(block.email, "resmi@hotel.co.id")
+        self.assertEqual(block.entity_name, "Hotel Resmi")
+        self.assertIn("Surabaya", block.address)
+        self.assertIn("60111", block.address)
+
+    def test_classify_page_detects_the_three_signals(self):
+        self.assertEqual(email_parser.classify_page(self.EL_HOTEL), "structured")
+        self.assertEqual(email_parser.classify_page(
+            '<html><body><address>Jl. A No. 1</address></body></html>'),
+            "structured")
+        self.assertEqual(email_parser.classify_page(
+            '<html><head><script type="application/ld+json">'
+            '{"@type":"LocalBusiness","name":"X"}</script></head>'
+            '<body>hi</body></html>'), "structured")
+        self.assertEqual(email_parser.classify_page(
+            "<html><body><p>Halaman biasa tanpa kontak.</p></body></html>"),
+            "flat")
+
+    # ---- the additive guarantee: nothing is ever lost to this layer ----
+
+    def test_flat_page_keeps_its_contact_and_is_labelled_flat(self):
+        """ADDITIVE GUARANTEE: a plain page still yields its email."""
+        html = ("<html><body><p>Silakan surel ke sales@ptmaju.co.id kapan saja."
+                "</p></body></html>")
+        result = extract_contacts(html, "https://ptmaju.co.id/")
+        email_parser._merge_contact_block(result, html, "https://ptmaju.co.id/")
+        self.assertEqual(result.page_type, "flat")
+        self.assertEqual(result.address, "")
+        self.assertEqual(result.emails, {"sales@ptmaju.co.id"})
+
+        rows = results_to_rows([result])
+        self.assertEqual(rows[0]["email"], "sales@ptmaju.co.id")
+        self.assertEqual(rows[0]["page_type"], "flat")
+
+    def test_a_crash_in_the_bonus_layer_does_not_lose_flat_results(self):
+        """ADDITIVE GUARANTEE: structured parsing is wrapped, never fatal."""
+        html = ("<html><body><h3>KONTAK</h3>"
+                "<p>Email : sales@ptmaju.co.id</p></body></html>")
+        result = extract_contacts(html, "https://ptmaju.co.id/")
+        self.assertEqual(result.emails, {"sales@ptmaju.co.id"})
+
+        with mock.patch.object(email_parser, "extract_contact_block",
+                               side_effect=RuntimeError("boom")):
+            email_parser._merge_contact_block(result, html,
+                                              "https://ptmaju.co.id/")
+        # Flat result intact despite the exception.
+        self.assertEqual(result.emails, {"sales@ptmaju.co.id"})
+
+    def test_no_block_means_no_row_is_dropped(self):
+        results = [
+            ContactResult(url="https://a.co.id/", company="A",
+                          emails={"a@a.co.id"}),
+            ContactResult(url="https://b.co.id/", company="B"),
+        ]
+        rows = results_to_rows(results)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["page_type"] for r in rows}, {"flat"})
+
+    def test_address_and_page_type_sit_before_search_query(self):
+        names = email_parser.FIELDNAMES
+        self.assertLess(names.index("address"), names.index("search_query"))
+        self.assertLess(names.index("page_type"), names.index("search_query"))
+        # Existing order untouched.
+        self.assertEqual(names[:8], [
+            "company", "email", "whatsapp", "website", "email_source",
+            "phone", "other_emails", "other_whatsapp"])
+
+    def test_block_company_name_wins_over_the_title_heuristic(self):
+        html = """<html><head><title>Beranda</title>
+        <script type="application/ld+json">
+        {"@type":"Hotel","name":"Hotel Bumi Surabaya","email":"i@bumi.co.id"}
+        </script></head><body><p>Halaman utama hotel.</p></body></html>"""
+        result = extract_contacts(html, "https://bumi.co.id/")
+        email_parser._merge_contact_block(result, html, "https://bumi.co.id/")
+        self.assertEqual(result.company, "Hotel Bumi Surabaya")
+
+    def test_placeholder_email_in_a_block_is_still_filtered(self):
+        html = ("<html><body><h3>KONTAK</h3>"
+                "<p>Email : example@example.com</p></body></html>")
+        result = ContactResult(url="https://x.co.id/")
+        email_parser._merge_contact_block(result, html, "https://x.co.id/")
+        self.assertEqual(result.emails, set())
+
+    def test_empty_block_returns_none(self):
+        html = ("<html><body><h3>KONTAK</h3><p>Silakan datang langsung.</p>"
+                "</body></html>")
+        self.assertIsNone(
+            email_parser.extract_contact_block(html, "https://x.co.id/"))
+
+
 class BotCheckTests(unittest.TestCase):
     """An interstitial served as HTTP 200 must not read as 'no contact'."""
 
@@ -580,6 +722,14 @@ class BotCheckTests(unittest.TestCase):
         result = extract_contacts(self.INTERSTITIAL, "https://konveksi.co.id/")
         self.assertEqual(result.error, "bot check / interstitial")
         self.assertEqual(result.total, 0)
+
+    def test_interstitial_title_does_not_become_the_company_name(self):
+        """"Just a moment..." must not beat the domain fallback in the CSV."""
+        html = "<html><head><title>Just a moment...</title></head><body>Just a moment...</body></html>"
+        result = extract_contacts(html, "https://discoverasr.com/hotel")
+        self.assertEqual(result.company, "")
+        rows = results_to_rows([result])
+        self.assertEqual(rows[0]["company"], "discoverasr.com")
 
     def test_cloudflare_challenge_is_caught(self):
         html = "<html><body>Checking your browser before accessing</body></html>"

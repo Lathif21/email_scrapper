@@ -216,6 +216,15 @@ class ContactResult:
     # Contact pages followed from this URL. Not a CSV column — it exists so the
     # run log can say where an address actually came from.
     followed: list = field(default_factory=list)
+    # Task 04 Part B, additive only. `page_type` is "structured" when a labelled
+    # contact block was found, "flat" otherwise; a flat page still keeps every
+    # contact the normal extraction found. `address` is new information that had
+    # nowhere to live before.
+    page_type: str = "flat"
+    address: str = ""
+    # Numbers taken from a labelled block or a tel:/JSON-LD field, which are
+    # explicit publications and so skip the mobile-length check.
+    labeled_phones: set = field(default_factory=set)
 
     @property
     def total(self) -> int:
@@ -431,6 +440,61 @@ def is_valid_id_mobile(normalized: str) -> bool:
     return digits.startswith("628") and 11 <= len(digits) <= 14
 
 
+@dataclass
+class ContactBlock:
+    """A labelled contact block found on a page.
+
+    Purely additive: a page with no block still produces the same row it always
+    did. This layer only adds `address` and sharpens `company` — it never
+    filters, and never decides a page is worth skipping.
+    """
+    label_matched: str = ""
+    entity_name: str = ""
+    address: str = ""
+    phone: str = ""
+    email: str = ""
+    whatsapp: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        return not any((self.address, self.phone, self.email, self.whatsapp))
+
+
+# Headings and ids/classes that mark a contact block.
+CONTACT_ANCHOR_WORDS = (
+    "informasi kontak", "hubungi kami", "contact us", "kontak", "contact",
+    "hubungi",
+)
+
+# schema.org @type values that mean "this is a business with contact details".
+STRUCTURED_LD_TYPES = {
+    "organization", "localbusiness", "hotel", "lodgingbusiness",
+    "restaurant", "place", "corporation", "store", "travelagency",
+}
+
+# Labelled lines inside a contact block: "Telephone : 62 22-4232286".
+# Tolerates the fullwidth colon that Indonesian CMS themes emit.
+_LABEL_SEP = r"\s*[:：]\s*"
+LABELLED_LINE_REGEXES = {
+    "phone": re.compile(
+        r"(?im)^\s*(?:telephone|telepon|telp|tel|phone|hp|t|p)" + _LABEL_SEP
+        + r"(\+?[\d\s().\-/]{7,30})"),
+    "email": re.compile(
+        r"(?im)^\s*(?:e-?mail|email|surel|e)" + _LABEL_SEP
+        + r"([\w.+-]+@[\w-]+\.[\w.]+)"),
+    "whatsapp": re.compile(
+        r"(?im)^\s*(?:whatsapp|wa)" + _LABEL_SEP + r"(\+?[\d\s().\-/]{7,30})"),
+    "address": re.compile(
+        r"(?im)^\s*(?:alamat|address|lokasi)" + _LABEL_SEP + r"(.{10,200})"),
+}
+
+# An unlabelled line that is obviously a street address: a street marker plus a
+# 5-digit postcode. Indonesian addresses almost always carry both.
+STREET_LINE_REGEX = re.compile(
+    r"(?im)^\s*((?:jl\.?|jalan|gedung|komplek|kompleks|ruko)\s+.{6,160}?\b\d{5}\b.*)$"
+)
+
+
 def _walk_json(node):
     """Yield every dict inside a nested JSON structure."""
     if isinstance(node, dict):
@@ -486,6 +550,164 @@ def extract_json_ld_contacts(soup) -> tuple:
     return emails, phones
 
 
+def _json_ld_nodes(soup):
+    """Every dict from every parseable JSON-LD block on the page."""
+    for tag in soup.find_all("script"):
+        if "ld+json" not in (tag.get("type") or "").lower():
+            continue
+        raw = tag.string or tag.get_text() or ""
+        if not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        yield from _walk_json(data)
+
+
+def _node_types(node) -> set:
+    value = node.get("@type") or node.get("type") or ""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return set()
+    return {str(v).lower() for v in value}
+
+
+def _format_ld_address(value) -> str:
+    """Flatten a schema.org PostalAddress into one line."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if not isinstance(value, dict):
+        return ""
+    parts = [value.get(k) for k in ("streetAddress", "addressLocality",
+                                    "addressRegion", "postalCode")]
+    return " ".join(" ".join(str(p).split()) for p in parts if p)
+
+
+def classify_page(html: str) -> str:
+    """"structured" or "flat" — a cheap check before the expensive work.
+
+    This ONLY sets page_type and decides whether block parsing is attempted. It
+    never causes a page to be skipped: a "flat" page still yields its row with
+    whatever the normal extraction found.
+    """
+    if not html:
+        return "flat"
+    soup = BeautifulSoup(html, "html.parser")
+
+    for node in _json_ld_nodes(soup):
+        if _node_types(node) & STRUCTURED_LD_TYPES:
+            return "structured"
+
+    if soup.find("address"):
+        return "structured"
+
+    return "structured" if _find_contact_anchor(soup) is not None else "flat"
+
+
+def _find_contact_anchor(soup):
+    """The element whose text or id/class marks it as the contact block."""
+    for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b",
+                                  "legend", "footer", "section", "div", "span",
+                                  "address", "aside"]):
+        own_text = element.get_text(" ", strip=True) or ""
+        # Compare only short text: a whole <div> of page copy containing the
+        # word "kontak" is not a heading.
+        heading = own_text.lower() if len(own_text) <= 40 else ""
+        identifiers = " ".join(filter(None, [
+            element.get("id") or "",
+            " ".join(element.get("class") or []),
+        ])).lower()
+
+        for word in CONTACT_ANCHOR_WORDS:
+            if heading == word or word in identifiers:
+                return element
+    return None
+
+
+def _anchor_scope_text(anchor) -> str:
+    """Text of the anchor, its parent, and the siblings that follow it.
+
+    Deliberately narrow. Falling back to the whole document would defeat the
+    point — the block's value is that the label belongs to a nearby value, not
+    to something 2000 characters away.
+    """
+    chunks = [anchor.get_text("\n", strip=True)]
+    for sibling in anchor.find_next_siblings(limit=4):
+        chunks.append(sibling.get_text("\n", strip=True))
+    if anchor.parent is not None:
+        chunks.append(anchor.parent.get_text("\n", strip=True))
+    return "\n".join(c for c in chunks if c)
+
+
+def extract_contact_block(html: str, url: str = "") -> ContactBlock:
+    """A labelled contact block, or None if the page has none.
+
+    JSON-LD wins when both are present: the site embedded it deliberately for
+    machines, so it is more reliable than the rendered HTML.
+
+    Measured on 10 real hotel and konveksi sites: 7 were detectable as
+    structured, but only 2 carried the `Label : value` footer pattern. JSON-LD
+    and contact anchors do the real work; labelled-line parsing is the bonus.
+    """
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    block = ContactBlock()
+
+    # --- JSON-LD first, it is the most reliable source available.
+    for node in _json_ld_nodes(soup):
+        if not (_node_types(node) & STRUCTURED_LD_TYPES):
+            continue
+        block.label_matched = block.label_matched or "json-ld"
+        if not block.entity_name and isinstance(node.get("name"), str):
+            block.entity_name = " ".join(node["name"].split())
+        if not block.email:
+            email = node.get("email")
+            if isinstance(email, str) and "@" in email:
+                if email.lower().startswith("mailto:"):
+                    email = email[len("mailto:"):]
+                block.email = email.strip()
+        if not block.phone:
+            phone = node.get("telephone")
+            if isinstance(phone, str) and any(c.isdigit() for c in phone):
+                block.phone = normalize_phone(phone.strip())
+        if not block.address:
+            block.address = _format_ld_address(node.get("address"))
+
+    # --- Labelled lines, scoped to the contact anchor.
+    anchor = _find_contact_anchor(soup)
+    if anchor is not None:
+        scope = _anchor_scope_text(anchor)
+        block.label_matched = block.label_matched or (
+            (anchor.get_text(" ", strip=True) or "")[:40].strip() or "anchor")
+
+        for field_name, pattern in LABELLED_LINE_REGEXES.items():
+            if getattr(block, field_name):
+                continue          # JSON-LD already supplied it
+            match = pattern.search(scope)
+            if not match:
+                continue
+            value = " ".join(match.group(1).split())
+            if field_name in ("phone", "whatsapp"):
+                value = normalize_phone(value)
+            setattr(block, field_name, value)
+
+        if not block.address:
+            street = STREET_LINE_REGEX.search(scope)
+            if street:
+                block.address = " ".join(street.group(1).split())
+
+    if not block.entity_name:
+        block.entity_name = extract_company_name(html, url)
+
+    if block.is_empty:
+        return None
+    return block
+
+
 def extract_contacts(html: str, url: str = "") -> ContactResult:
     """Pull all contact types out of raw HTML. No network access — safe to unit test."""
     result = ContactResult(url=url)
@@ -515,6 +737,9 @@ def extract_contacts(html: str, url: str = "") -> ContactResult:
         # Not a company with no address — a page we were never shown. Saying so
         # keeps it out of the "no contact published" bucket.
         result.error = "bot check / interstitial"
+        # The interstitial's <title> is not a company name ("Just a moment..."),
+        # and it would otherwise beat the domain fallback in the CSV.
+        result.company = ""
         return result
 
     result.emails = clean_emails(list(EMAIL_REGEX.findall(markup)) + ld_emails)
@@ -652,6 +877,38 @@ def _fetch_page(url: str, timeout: int = REQUEST_TIMEOUT) -> tuple:
     return None, "all attempts failed"
 
 
+def _merge_contact_block(result: ContactResult, html: str, url: str) -> None:
+    """Fold a structured block into `result`. Never removes anything.
+
+    Wrapped in try/except on purpose: a parsing bug in this bonus layer must
+    not be able to lose the flat extraction, which is the result that matters.
+    """
+    try:
+        if classify_page(html) != "structured":
+            return
+        block = extract_contact_block(html, url)
+        if block is None:
+            return
+
+        result.page_type = "structured"
+        if block.address and not result.address:
+            result.address = block.address
+        if block.email:
+            result.emails |= clean_emails([block.email])
+        if block.whatsapp:
+            result.whatsapp.add(block.whatsapp)
+        if block.phone:
+            # Labelled, so trusted like a wa.me or tel: number: a hotel's
+            # reservation line is a fixed line and the mobile rule would drop it.
+            result.labeled_phones.add(block.phone)
+            result.phones.add(block.phone)
+        # A name from the block beats the title heuristic — it is more specific.
+        if block.entity_name:
+            result.company = block.entity_name
+    except Exception as e:                      # noqa: BLE001 - bonus layer
+        print(f"      [struct] skipped ({type(e).__name__}: {e})")
+
+
 def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIMEOUT,
                follow_contact: bool = True, delay: float = 0) -> ContactResult:
     """Fetch a URL and extract contacts from it.
@@ -672,7 +929,10 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
     if error is not None:
         return ContactResult(url=url, error=error)
 
+    # Flat extraction runs first and unconditionally. Everything below only
+    # adds to it.
     result = extract_contacts(html, url=url)
+    _merge_contact_block(result, html, url)
 
     # An email is the column that matters most, so that is the trigger. A page
     # that already published one needs no second request.
@@ -695,6 +955,10 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
         result.whatsapp |= found.whatsapp
         result.phones |= found.phones
         result.followed.append(link)
+
+        # The structured block usually lives on the contact page, not the
+        # homepage — so look for it here too, and let page_type reflect that.
+        _merge_contact_block(result, sub_html, link)
 
         if result.emails:
             break
@@ -743,7 +1007,11 @@ def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
 
 FIELDNAMES = [
     "company", "email", "whatsapp", "website", "email_source",
-    "phone", "other_emails", "other_whatsapp", "search_query", "status",
+    "phone", "other_emails", "other_whatsapp",
+    # Task 04 Part B, inserted before search_query so consumers that read by
+    # column name keep working and the existing order is unchanged.
+    "address", "page_type",
+    "search_query", "status",
 ]
 
 
@@ -775,6 +1043,8 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
             "emails": set(),
             "whatsapp": set(),
             "phones": set(),
+            "address": "",
+            "page_type": "flat",
             "search_query": "",
             "status": "",
         })
@@ -784,6 +1054,11 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
         entry["emails"] |= result.emails
         entry["whatsapp"] |= result.whatsapp
         entry["phones"] |= result.phones
+        if result.address and not entry["address"]:
+            entry["address"] = result.address
+        # Any structured page in the group makes the company structured.
+        if result.page_type == "structured":
+            entry["page_type"] = "structured"
 
         query = (extra_by_url.get(result.url) or {}).get("search_query", "")
         if query and not entry["search_query"]:
@@ -817,6 +1092,8 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
             "phone": "; ".join(sorted(entry["phones"])),
             "other_emails": "; ".join(e for e in emails if e != primary_email),
             "other_whatsapp": "; ".join(whatsapp[1:]),
+            "address": entry["address"],
+            "page_type": entry["page_type"],
             "search_query": entry["search_query"],
             "status": entry["status"] or "ok",
         })
