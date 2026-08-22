@@ -393,3 +393,25 @@ victim's size and timestamp before it goes. Auto-suffixing instead was
 considered and rejected: it never loses data, but it silently accumulates
 `kontak-2`, `kontak-3` files that nobody reconciles, and repeat runs of the same
 command overwriting their own output is the behaviour that existed before.
+
+
+## A locked output file must not cost the run
+
+`write_csv()` returns the path it actually wrote, and falls back to
+`name-2.csv`, `name-3.csv`, ... when the requested file cannot be opened. On
+Windows this happens routinely: Excel holds an exclusive lock on an open CSV, so
+`open(path, "w")` raises `PermissionError`.
+
+The reason for recovering rather than raising is where in the pipeline this sits.
+Stage 3 runs after the search credits are spent and every page has been fetched,
+so an exception there discards the entire run's results over a file the user
+merely forgot to close. That is the most expensive failure the pipeline can have,
+and it is entirely avoidable.
+
+Callers must use the returned path, not the requested one — `main.py` names the
+`.enc` from it, so an encrypted run stays consistent with the plaintext it
+actually encrypted.
+
+Only the lock is worked around. If every candidate fails the last error is
+raised, because an unwritable directory is a real problem the caller has to see
+rather than a name collision to route around.

@@ -12,6 +12,12 @@ tests pinning the two pieces that were verified correct and must not drift
 (`normalize_phone` trunk-zero handling and the conservative `PHONE_REGEX`).
 """
 
+import builtins
+import csv
+import io
+import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -567,6 +573,86 @@ class FollowContactTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- regressions
+
+class WriteCsvLockTests(unittest.TestCase):
+    """A locked output file must not throw away the run's results.
+
+    Real failure: `PermissionError: [Errno 13] Permission denied: 'konveksi.csv'`
+    raised from stage 3 because the CSV was still open in Excel. By then the
+    search credits are spent and every page has been fetched, so losing the rows
+    over a file lock is the most expensive failure the pipeline has.
+    """
+
+    ROWS = [{"company": "PT Maju", "email": "a@maju.co.id", "whatsapp": "",
+             "website": "https://maju.co.id/", "email_source": "found",
+             "phone": "", "other_emails": "", "other_whatsapp": "",
+             "address": "", "page_type": "flat", "render_mode": "static",
+             "search_query": "", "status": "ok"}]
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.target = os.path.join(self.dir, "kontak.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @staticmethod
+    def _deny(*blocked):
+        """Wrap open() so writing any path in `blocked` raises PermissionError."""
+        real_open = builtins.open
+        blocked = set(blocked)
+
+        def fake_open(file, mode="r", *args, **kwargs):
+            if "w" in mode and str(file) in blocked:
+                raise PermissionError(13, "Permission denied")
+            return real_open(file, mode, *args, **kwargs)
+
+        return mock.patch("builtins.open", fake_open)
+
+    def test_unlocked_path_is_used_as_requested(self):
+        written = email_parser.write_csv(self.ROWS, self.target)
+        self.assertEqual(written, self.target)
+        self.assertTrue(os.path.exists(self.target))
+
+    def test_locked_path_falls_back_to_a_numbered_sibling(self):
+        with self._deny(self.target):
+            written = email_parser.write_csv(self.ROWS, self.target)
+        expected = os.path.join(self.dir, "kontak-2.csv")
+        self.assertEqual(written, expected)
+        self.assertTrue(os.path.exists(expected))
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_fallback_keeps_every_row(self):
+        with self._deny(self.target):
+            written = email_parser.write_csv(self.ROWS, self.target)
+        with io.open(written, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["email"], "a@maju.co.id")
+
+    def test_second_collision_walks_further(self):
+        second = os.path.join(self.dir, "kontak-2.csv")
+        with self._deny(self.target, second):
+            written = email_parser.write_csv(self.ROWS, self.target)
+        self.assertEqual(written, os.path.join(self.dir, "kontak-3.csv"))
+
+    def test_the_lock_is_explained_not_swallowed(self):
+        buf = io.StringIO()
+        with self._deny(self.target):
+            with mock.patch("sys.stdout", buf):
+                email_parser.write_csv(self.ROWS, self.target)
+        said = buf.getvalue()
+        self.assertIn("LOCKED", said)
+        self.assertIn("Excel", said)
+
+    def test_an_unwritable_directory_still_raises(self):
+        """Only a lock is worked around; a genuinely bad path must surface."""
+        blocked = [self.target] + [
+            os.path.join(self.dir, f"kontak-{n}.csv") for n in range(2, 22)]
+        with self._deny(*blocked):
+            with self.assertRaises(PermissionError):
+                email_parser.write_csv(self.ROWS, self.target)
+
 
 class ContactBlockTests(unittest.TestCase):
     """Task 04 Part B — structured extraction is a bonus layer, never a filter."""

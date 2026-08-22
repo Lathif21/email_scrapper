@@ -50,6 +50,7 @@ Library usage (how main.py calls it):
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -1246,18 +1247,50 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
     return rows
 
 
-def write_csv(rows: list, output_path: str) -> None:
-    """Write rows to CSV. utf-8-sig so Excel opens it correctly."""
+def write_csv(rows: list, output_path: str) -> str:
+    """Write rows to CSV. utf-8-sig so Excel opens it correctly.
+
+    Returns the path actually written, which may differ from `output_path`.
+
+    If the requested file cannot be opened — on Windows, routinely because it is
+    still open in Excel — a numbered sibling is used instead rather than letting
+    the write raise. This is the last step of the pipeline: by the time it runs,
+    search credits have been spent and every page has been fetched, so throwing
+    the rows away over a file lock is the most expensive failure available.
+    """
     fieldnames = list(FIELDNAMES)
     for row in rows:
         for key in row:
             if key not in fieldnames:
                 fieldnames.append(key)
 
-    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    for candidate in _output_candidates(output_path):
+        try:
+            with open(candidate, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            return candidate
+        except OSError as e:
+            if candidate == output_path:
+                print(f"[LOCKED] Tidak bisa menulis '{output_path}': "
+                      f"{type(e).__name__}: {e}")
+                print("         Biasanya file itu masih terbuka di Excel atau "
+                      "editor. Mencoba nama lain")
+                print("         supaya hasil run ini tidak hilang.")
+            last_error = e
+
+    # Every candidate failed — the directory itself is probably unwritable, and
+    # that is a real error the caller has to see.
+    raise last_error
+
+
+def _output_candidates(output_path: str, limit: int = 20):
+    """The requested path, then `name-2.csv`, `name-3.csv`, ... beside it."""
+    yield output_path
+    stem, ext = os.path.splitext(output_path)
+    for n in range(2, limit + 1):
+        yield f"{stem}-{n}{ext}"
 
 
 # ---------------------------------------------------------------- CLI
@@ -1318,8 +1351,8 @@ def main():
                 row["email"] = ""
                 row["email_source"] = ""
 
-    write_csv(rows, args.output)
-    print(f"\nDone. {len(rows)} company/companies -> '{args.output}'")
+    written = write_csv(rows, args.output)
+    print(f"\nDone. {len(rows)} company/companies -> '{written}'")
 
 
 if __name__ == "__main__":

@@ -456,8 +456,12 @@ def stage_output(rows: list, args) -> None:
     print("[STAGE 3/3] Output")
     print("-" * 52)
 
-    email_parser.write_csv(rows, args.output)
-    print(f"Wrote {len(rows)} row(s) -> '{args.output}'")
+    # write_csv falls back to a numbered sibling if the requested file is locked
+    # (Excel), so everything downstream must follow the path it actually used.
+    written = email_parser.write_csv(rows, args.output)
+    print(f"Wrote {len(rows)} row(s) -> '{written}'")
+    if written != args.output:
+        print(f"         (bukan '{args.output}' — file itu terkunci)")
 
     if not args.encrypt:
         print("\nNOTE: output is plaintext. Use --encrypt to protect it at rest.")
@@ -469,16 +473,16 @@ def stage_output(rows: list, args) -> None:
     # Every encrypted output lands in one managed directory, so contact data is
     # never scattered across the repo.
     encrypted_path = managed_path(ENCRYPTED_DIR,
-                                  os.path.basename(args.output) + ".enc")
+                                  os.path.basename(written) + ".enc")
     warn_if_replacing(encrypted_path)
-    encrypt_file(args.output, encrypted_path, password, remove_plaintext=True)
+    encrypt_file(written, encrypted_path, password, remove_plaintext=True)
 
     # Don't claim the plaintext is gone without looking: on Windows the delete
     # fails whenever another process holds the file open, and encrypt_file
     # reports that rather than raising.
-    if os.path.exists(args.output):
+    if os.path.exists(written):
         print(f"Encrypted -> '{encrypted_path}'")
-        print(f"Plaintext '{args.output}' could NOT be removed — see the warning above.")
+        print(f"Plaintext '{written}' could NOT be removed — see the warning above.")
     else:
         print(f"Encrypted -> '{encrypted_path}' (plaintext removed)")
     print(f"Decrypt with: python decrypt.py {encrypted_path}")

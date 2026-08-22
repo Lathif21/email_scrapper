@@ -120,16 +120,12 @@ Decrypt with: python decrypt.py output\encrypted\contacts.csv.enc
 ```
 
 `--encrypt` **deletes the plaintext `contacts.csv`** after encrypting it, so the
-`.enc` is the only copy. It is written to **`output/encrypted/`**:
+`.enc` in `output/encrypted/` is the only copy. Everything `decrypt.py` writes
+back lands in `output/decrypted/`. Both directories are created on demand and
+`output/` is gitignored, so contact data stays off GitHub.
 
-```
-Wrote 1 row(s) -> 'contacts.csv'
-Encrypted -> 'output\encrypted\contacts.csv.enc' (plaintext removed)
-```
-
-Everything `decrypt.py` writes back lands in **`output/decrypted/`**. Both
-directories are created on demand and `output/` is gitignored, so contact data
-stays off GitHub.
+Leave `--encrypt` off while you're still experimenting and you'll get a plain
+readable CSV instead.
 
 Because every run funnels into the same directory, names collide far more easily
 than when outputs sat beside their inputs — so an overwrite is announced before
@@ -139,11 +135,25 @@ it happens:
 [REPLACING] 'output\encrypted\kontak.csv.enc' (dibuat 2026-08-22 18:24, 584 byte) ditimpa.
 ```
 
-Pass `-o` to `encrypt.py` or `decrypt.py` and that exact path is used instead. Leave `--encrypt` off while you're still
-experimenting and you'll get a plain readable CSV instead.
+Pass `-o` to `encrypt.py` or `decrypt.py` and that exact path is used instead.
 
 Expect some URLs to be skipped — `robots.txt` disallows, `403`, or a broken
 certificate. That's normal and the run continues.
+
+**If the output CSV is open in Excel**, the write cannot go to that name — on
+Windows Excel holds an exclusive lock. Rather than losing the run, a numbered
+sibling is used and the swap is reported:
+
+```
+[LOCKED] Tidak bisa menulis 'konveksi.csv': PermissionError: [Errno 13] ...
+         Biasanya file itu masih terbuka di Excel atau editor. Mencoba nama lain
+         supaya hasil run ini tidak hilang.
+Wrote 34 row(s) -> 'konveksi-2.csv'
+```
+
+With `--encrypt` the `.enc` follows the name actually written, so it becomes
+`output/encrypted/konveksi-2.csv.enc`. Close the file before the next run to get
+your chosen name back.
 
 ### 5. Read the results back
 
