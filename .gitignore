@@ -10,10 +10,16 @@
 *.enc
 !queries_example.txt
 !urls_example.txt
+!segments_example.json
 
-# Scraper cache
+# Personal working query list — queries_example.txt is the committed template.
+queries.txt
+
+# Scraper cache / state
 .search_cache.json
 .google_search_cache.json
+.serper_cache.json
+.search_state.db
 
 # Python
 __pycache__/
@@ -28,4 +34,5 @@ env/
 Thumbs.db
 desktop.ini
 
-Output
+# Logs
+*.log

@@ -7,10 +7,27 @@ consumers can filter:
 
     email     (high) — standard address regex, image-filename false positives removed
     whatsapp  (high) — from explicit wa.me / api.whatsapp.com links
-    phone     (low)  — Indonesian-format digit strings found in page text; may be
-                       landlines, fax numbers, or unrelated numbers. Verify before use.
+    phone     (low)  — Indonesian mobile-format digit strings found in page text,
+                       validated to 11-14 digits after normalizing to +62. Still
+                       low confidence — a valid-looking number need not be the
+                       company's. Verify before use.
 
-Respects robots.txt by default and rate-limits itself between requests.
+A page that publishes no email is not the end of the search: contact-page links
+found on it ("Kontak", "Hubungi Kami", "/contact") are followed one level deep,
+same host only, at most two of them. Most small business sites keep the address
+on that page and not on the homepage. `--no-follow-contact` turns it off.
+
+Respects robots.txt by default and rate-limits itself between requests — the
+followed pages are checked against robots.txt and delayed like any other fetch.
+
+Two defaults worth knowing:
+
+    * No address is invented. A site publishing nothing gets an empty `email`
+      unless --guess-email is passed, and a guessed cs@<domain> address is
+      unverified — it will bounce, and bounces cost sending reputation.
+    * Free-mail addresses (gmail.com and friends) are kept. For Indonesian SMEs
+      a Gmail address is often the only published business contact. Pass
+      --ignore-free-mail to filter them out.
 
 CLI usage (standalone, from a URL list):
     python email_parser.py urls.txt -o contacts.csv
@@ -29,10 +46,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
+from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------- patterns
 
@@ -54,6 +72,13 @@ WA_LINK_REGEX = re.compile(
 #   [-.\s]?            optional separator right after the prefix ("+62 812 ...")
 #   8[0-9]{1,2}        Indonesian mobile prefixes start with 8
 #   (?!\d)             don't stop mid-way through a longer number
+#
+# Total length is NOT enforced here. Separators make the digit count awkward to
+# pin down in the pattern, so is_valid_id_mobile() gates the normalized result
+# instead. Tightening the final group to {4,5} was tried and reverted: it
+# rejected nothing the validator does not already reject, and it silently
+# dropped valid 12-digit numbers written with a 3-digit tail group
+# ("0811-2345-678"). Keep this pattern permissive and let the validator decide.
 PHONE_REGEX = re.compile(
     r"(?<![\d+])(?:\+62|62|0)[-.\s]?8[0-9]{1,2}[-.\s]?[0-9]{3,4}[-.\s]?[0-9]{3,5}(?!\d)"
 )
@@ -70,10 +95,21 @@ PLACEHOLDER_EMAILS = {
     "info@example.com", "sample@email.com",
 }
 
-# Free-mail domains to drop: a personal inbox is rarely the business contact you
-# want, and it's the address most likely to belong to an individual rather than
-# the company. Add "yahoo.com", "hotmail.com", "outlook.com" here to widen it.
-IGNORED_EMAIL_DOMAINS = {"gmail.com"}
+# Free-mail domains, filtered only when --ignore-free-mail asks for it.
+# Dropping them by default loses real prospects: a large share of Indonesian
+# SMEs — konveksi, distributors, small manufacturers — publish a Gmail address
+# as their one business contact, and discarding it removes the lead with no
+# trace in the output or the log.
+FREE_MAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "yahoo.co.id", "hotmail.com", "outlook.com",
+}
+
+# Empty by default. set_free_mail_filter(True) fills it with FREE_MAIL_DOMAINS.
+IGNORED_EMAIL_DOMAINS = set()
+
+# Counts what IGNORED_EMAIL_DOMAINS discarded, so the loss can be reported
+# instead of being silent.
+_dropped_free_mail = 0
 
 # When a site publishes no usable address, fall back to <local>@<domain>.
 GUESSED_LOCAL_PART = "cs"
@@ -90,6 +126,17 @@ PREFERRED_LOCAL_PARTS = (
     "cs", "info", "contact", "kontak", "sales", "marketing", "reservation",
     "reservasi", "booking", "enquiry", "inquiry", "hello", "admin", "office",
 )
+
+# Words that mark a link as pointing at contact details, most direct first. The
+# order is the priority order: a "Kontak" link is a better bet than "About Us".
+CONTACT_LINK_WORDS = (
+    "kontak", "contact", "hubungi", "reservasi", "reservation",
+    "tentang", "about",
+)
+
+# At most this many extra pages per site. The point is to find the one page the
+# address lives on, not to crawl the site.
+MAX_CONTACT_PAGES = 2
 
 # Page titles that name the page, not the company — fall through to the domain.
 GENERIC_TITLES = {
@@ -119,6 +166,19 @@ HEADERS = {
 
 REQUEST_TIMEOUT = 10
 DEFAULT_DELAY = 2
+ROBOTS_TIMEOUT = 5
+
+# A body is read into memory, so it needs a ceiling. 5 MB is far above any real
+# HTML page and still bounded when a host serves an archive as text/html.
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+CHUNK_SIZE = 64 * 1024
+
+# One initial attempt plus two retries, waiting 2s then 4s. Same shape as
+# google_search_scrapper._fetch() — one retry idiom in the project, not two.
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2  # seconds
+
+CHARSET_META_REGEX = re.compile(rb'''charset=["']?([\w-]+)''', re.IGNORECASE)
 
 # Cache robots.txt lookups so a 50-page crawl of one domain fetches it once.
 _ROBOTS_CACHE = {}
@@ -135,6 +195,9 @@ class ContactResult:
     whatsapp: set = field(default_factory=set)
     phones: set = field(default_factory=set)
     error: str = None
+    # Contact pages followed from this URL. Not a CSV column — it exists so the
+    # run log can say where an address actually came from.
+    followed: list = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -153,10 +216,18 @@ def is_allowed_by_robots(url: str, user_agent: str = None) -> bool:
         if base not in _ROBOTS_CACHE:
             rp = RobotFileParser()
             rp.set_url(f"{base}/robots.txt")
+            # Not rp.read(): it calls urlopen with no timeout, so a host that
+            # accepts the connection and never answers blocks the process
+            # forever — and a hang is not an exception, so no try/except can
+            # catch it. Fetch it here, with a timeout, and feed the parser.
             try:
-                rp.read()
+                resp = requests.get(f"{base}/robots.txt", headers=HEADERS,
+                                    timeout=ROBOTS_TIMEOUT)
+                # A 404 means no restrictions, and parse([]) allows everything —
+                # the same fail-open behaviour this has always had.
+                rp.parse(resp.text.splitlines() if resp.status_code == 200 else [])
                 _ROBOTS_CACHE[base] = rp
-            except Exception:
+            except requests.RequestException:
                 _ROBOTS_CACHE[base] = None  # unreachable -> allow
 
         rp = _ROBOTS_CACHE[base]
@@ -165,8 +236,26 @@ def is_allowed_by_robots(url: str, user_agent: str = None) -> bool:
         return True
 
 
+def set_free_mail_filter(enabled: bool) -> None:
+    """Turn free-mail filtering on or off, and reset the dropped counter."""
+    global IGNORED_EMAIL_DOMAINS, _dropped_free_mail
+    IGNORED_EMAIL_DOMAINS = set(FREE_MAIL_DOMAINS) if enabled else set()
+    _dropped_free_mail = 0
+
+
+def dropped_free_mail_count() -> int:
+    """How many addresses the free-mail filter has discarded so far."""
+    return _dropped_free_mail
+
+
 def clean_emails(raw_emails) -> set:
-    """Lowercase, drop asset filenames, template placeholders and free-mail domains."""
+    """Lowercase, drop asset filenames and template placeholders.
+
+    Free-mail domains go too, but only when IGNORED_EMAIL_DOMAINS has been
+    filled in (see set_free_mail_filter) — by default it is empty and every
+    address survives.
+    """
+    global _dropped_free_mail
     cleaned = set()
     for email in raw_emails:
         email = email.lower().strip(".")
@@ -175,6 +264,7 @@ def clean_emails(raw_emails) -> set:
         if email in PLACEHOLDER_EMAILS:
             continue
         if email.rsplit("@", 1)[-1] in IGNORED_EMAIL_DOMAINS:
+            _dropped_free_mail += 1
             continue
         cleaned.add(email)
     return cleaned
@@ -192,6 +282,22 @@ def registrable_domain(url: str) -> str:
     if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_TLDS:
         return ".".join(labels[-3:])
     return ".".join(labels[-2:])
+
+
+def site_host(url: str) -> str:
+    """Full host, lowercased, port and a leading 'www.' stripped.
+
+    This is the grouping key for the one-row-per-company CSV. The registrable
+    domain is the wrong key: it merges two unrelated shops that happen to share
+    blogspot.com, and it merges bandung.el-hotels.com with jakarta.el-hotels.com
+    even though each branch is a separate sales target with its own reservations
+    desk. Two paths on one host still merge, which is the behaviour that was
+    actually wanted.
+    """
+    host = urlparse(url).netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
 
 
 def guess_email_from_url(url: str) -> str:
@@ -254,38 +360,219 @@ def normalize_phone(raw: str) -> str:
     return "+" + digits
 
 
+def is_valid_id_mobile(normalized: str) -> bool:
+    """True if `normalized` (+62XXXXXXXXX) is a plausible Indonesian mobile.
+
+    An Indonesian mobile is '62' + 9-12 subscriber digits, so 11-14 digits in
+    total. PHONE_REGEX deliberately does not enforce that — separators make the
+    digit count awkward to express in the pattern, and a stricter pattern drops
+    valid numbers. This is the single place total length is decided.
+
+    Only for PHONE_REGEX hits. A wa.me link is an explicit statement by the
+    site that the number is reachable, so it is trusted as-is.
+    """
+    digits = normalized.lstrip("+")
+    return digits.startswith("628") and 11 <= len(digits) <= 14
+
+
 def extract_contacts(html: str, url: str = "") -> ContactResult:
     """Pull all contact types out of raw HTML. No network access — safe to unit test."""
     result = ContactResult(url=url)
     result.company = extract_company_name(html, url)
-    result.emails = clean_emails(EMAIL_REGEX.findall(html))
+
+    # Analytics config, JSON-LD vendor fields and CSS all hold @-strings that
+    # are not leads, and pick_primary_email() will happily choose a vendor's
+    # noreply@ over the real address because it is shorter. Strip those
+    # elements before the email and phone regexes run.
+    #
+    # Markup, not get_text(): mailto: and wa.me live in href attributes, which
+    # text-only extraction throws away.
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript", "template"]):
+        element.decompose()
+    markup = str(soup)
+
+    result.emails = clean_emails(EMAIL_REGEX.findall(markup))
+    # wa.me links are read from the original HTML. hrefs survive the strip, but
+    # this is the highest-confidence signal here and isn't worth risking.
     result.whatsapp = {normalize_phone(n) for n in WA_LINK_REGEX.findall(html)}
-    text_phones = {normalize_phone(n) for n in PHONE_REGEX.findall(html)}
+    # Length-checked: the regex still matches price fragments and ID offcuts
+    # that happen to look phone-shaped, and an invalid number in the output is
+    # worse than none — it gets dialled.
+    text_phones = {n for n in (normalize_phone(m) for m in PHONE_REGEX.findall(markup))
+                   if is_valid_id_mobile(n)}
     # A number already confirmed as WhatsApp shouldn't also appear as a low-confidence phone.
     result.phones = text_phones - result.whatsapp
     return result
 
 
-def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIMEOUT) -> ContactResult:
-    """Fetch a URL and extract contacts from it."""
+def find_contact_links(html: str, url: str, limit: int = MAX_CONTACT_PAGES) -> list:
+    """Same-host URLs on this page that look like contact pages, best first.
+
+    Only links the page actually publishes are returned. Guessing paths instead
+    (`/kontak`, `/contact`, …) mostly buys 404s — verified against real sites —
+    and spends a request per guess on every site that doesn't use that spelling.
+    """
+    here = urldefrag(url)[0].rstrip("/")
+    host = site_host(url)
+    soup = BeautifulSoup(html, "html.parser")
+
+    ranked = {}
+    for anchor in soup.select("a[href]"):
+        href = anchor["href"].strip()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+
+        target = urldefrag(urljoin(url, href))[0].rstrip("/")
+        if not target or target == here:
+            continue
+        if urlparse(target).scheme not in ("http", "https"):
+            continue
+        if site_host(target) != host:  # a contact page on someone else's site isn't one
+            continue
+
+        haystack = f"{href} {anchor.get_text(' ', strip=True)}".lower()
+        for rank, word in enumerate(CONTACT_LINK_WORDS):
+            if word in haystack:
+                # Keep the best rank each URL earns, and the shortest path at
+                # that rank — "/kontak" beats "/blog/kontak-kami-2019".
+                if target not in ranked or rank < ranked[target]:
+                    ranked[target] = rank
+                break
+
+    return sorted(ranked, key=lambda t: (ranked[t], len(t)))[:limit]
+
+
+def _decode_body(body: bytes, response) -> str:
+    """Decode a streamed body — requests' .text is unavailable once we stream."""
+    charset = None
+    if "charset=" in response.headers.get("Content-Type", "").lower():
+        charset = response.encoding
+    if not charset:
+        match = CHARSET_META_REGEX.search(body[:4096])
+        if match:
+            charset = match.group(1).decode("ascii", "ignore")
+    try:
+        return body.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def _fetch_once(url: str, timeout: int) -> tuple:
+    """One GET with a bounded body. Returns (html, error).
+
+    Transient network errors propagate so _fetch_page can retry them; anything
+    the server actually answered comes back as an error string.
+    """
+    response = requests.get(url, headers=HEADERS, timeout=timeout, stream=True)
+    try:
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            return None, f"{type(e).__name__}: {e}"
+
+        # Checked before the body is read, so a non-HTML response costs headers
+        # only instead of a full download.
+        content_type = response.headers.get("Content-Type", "")
+        if "html" not in content_type and "text" not in content_type:
+            return None, f"skipped non-HTML content ({content_type})"
+
+        declared = response.headers.get("Content-Length", "")
+        if declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
+            return None, "response too large"
+
+        # No Content-Length, or a lying one: read incrementally and abort past
+        # the cap rather than trusting the header.
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+            body.extend(chunk)
+            if len(body) > MAX_RESPONSE_BYTES:
+                return None, "response too large"
+
+        return _decode_body(bytes(body), response), None
+    finally:
+        response.close()
+
+
+def _fetch_page(url: str, timeout: int = REQUEST_TIMEOUT) -> tuple:
+    """GET with retry/backoff on transient failures. Returns (html, error).
+
+    Retries ConnectionError and Timeout only — an HTTP 4xx is a real answer, not
+    a blip. Without this, one momentary DNS failure drops a URL for the whole
+    run and the CSV records it as an error row.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            return _fetch_once(url, timeout)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF * (2 ** attempt)
+                print(f"      [retry {attempt + 1}/{MAX_RETRIES - 1}] "
+                      f"{type(e).__name__} — waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                return None, f"{type(e).__name__}: {e}"
+        except requests.RequestException as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    return None, "all attempts failed"
+
+
+def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIMEOUT,
+               follow_contact: bool = True, delay: float = 0) -> ContactResult:
+    """Fetch a URL and extract contacts from it.
+
+    When the page yields no email address and follow_contact is on, the contact
+    pages it links to are fetched too (at most MAX_CONTACT_PAGES, same host) and
+    their contacts merged into this result. Reading only the given URL is why so
+    many rows came back empty: a homepage links to "Kontak" and keeps the
+    address there.
+
+    Followed pages obey robots.txt and wait `delay` seconds between fetches,
+    exactly like top-level ones.
+    """
     if respect_robots and not is_allowed_by_robots(url):
         return ContactResult(url=url, error="blocked by robots.txt")
 
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=timeout)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        return ContactResult(url=url, error=f"{type(e).__name__}: {e}")
+    html, error = _fetch_page(url, timeout)
+    if error is not None:
+        return ContactResult(url=url, error=error)
 
-    content_type = response.headers.get("Content-Type", "")
-    if "html" not in content_type and "text" not in content_type:
-        return ContactResult(url=url, error=f"skipped non-HTML content ({content_type})")
+    result = extract_contacts(html, url=url)
 
-    return extract_contacts(response.text, url=url)
+    # An email is the column that matters most, so that is the trigger. A page
+    # that already published one needs no second request.
+    if not follow_contact or result.emails:
+        return result
+
+    for link in find_contact_links(html, url):
+        if respect_robots and not is_allowed_by_robots(link):
+            continue
+
+        if delay:
+            time.sleep(delay)
+
+        sub_html, sub_error = _fetch_page(link, timeout)
+        if sub_error is not None:
+            continue
+
+        found = extract_contacts(sub_html, url=link)
+        result.emails |= found.emails
+        result.whatsapp |= found.whatsapp
+        result.phones |= found.phones
+        result.followed.append(link)
+
+        if result.emails:
+            break
+
+    # The merged sets can now disagree about a number that the contact page
+    # published as a WhatsApp link and the homepage only as text.
+    result.phones -= result.whatsapp
+    return result
 
 
 def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
-                verbose: bool = True) -> list:
+                verbose: bool = True, follow_contact: bool = True) -> list:
     """Scrape a list of URLs sequentially with a delay. Returns list of ContactResult."""
     results = []
     total = len(urls)
@@ -294,7 +581,8 @@ def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
         if verbose:
             print(f"  [{i}/{total}] {url}")
 
-        result = scrape_url(url, respect_robots=respect_robots)
+        result = scrape_url(url, respect_robots=respect_robots,
+                            follow_contact=follow_contact, delay=delay)
         results.append(result)
 
         if verbose:
@@ -303,8 +591,15 @@ def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
             elif result.total == 0:
                 print("      -> no contacts found")
             else:
+                via = ""
+                if result.followed:
+                    paths = ", ".join(urlparse(p).path or "/" for p in result.followed)
+                    via = f" (via {paths})"
                 print(f"      -> emails={len(result.emails)} "
-                      f"whatsapp={len(result.whatsapp)} phone={len(result.phones)}")
+                      f"whatsapp={len(result.whatsapp)} phone={len(result.phones)}{via}")
+            if result.followed and result.total == 0:
+                print(f"      -> also read {len(result.followed)} contact page(s), "
+                      "still nothing")
 
         if i < total:
             time.sleep(delay)
@@ -318,25 +613,29 @@ FIELDNAMES = [
 ]
 
 
-def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = True) -> list:
+def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = False) -> list:
     """Collapse ContactResults into one row per company.
 
-    Results are grouped by registrable domain, so a company found through three
-    different pages becomes one row with the union of its contacts rather than
-    three near-duplicate rows.
+    Results are grouped by host (see site_host), so a company found through
+    three pages of one site becomes one row holding the union of its contacts
+    rather than three near-duplicate rows — while two businesses on separate
+    subdomains stay two rows.
 
     Errored results are kept: a site we were not allowed to fetch still has a
-    usable domain, which is enough for a guessed address and a company name.
+    usable domain, which is enough for a company name.
+
+    guess_email defaults to False. Synthesizing cs@<domain> invents an address
+    nobody confirmed exists, so it has to be asked for.
     """
     extra_by_url = extra_by_url or {}
     companies = {}
 
     for result in results:
-        domain = registrable_domain(result.url)
-        if not domain:
+        host = site_host(result.url)
+        if not host:
             continue
 
-        entry = companies.setdefault(domain, {
+        entry = companies.setdefault(host, {
             "company": "",
             "website": result.url,
             "emails": set(),
@@ -365,7 +664,7 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = True
             entry["status"] = result.error
 
     rows = []
-    for domain, entry in sorted(companies.items()):
+    for host, entry in sorted(companies.items()):
         emails = sorted(entry["emails"])
         primary_email = pick_primary_email(emails)
         email_source = "found" if primary_email else ""
@@ -376,7 +675,7 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = True
 
         whatsapp = sorted(entry["whatsapp"])
         rows.append({
-            "company": entry["company"] or domain,
+            "company": entry["company"] or host,
             "email": primary_email,
             "whatsapp": whatsapp[0] if whatsapp else "",
             "website": entry["website"],
@@ -418,12 +717,19 @@ def main():
     parser.add_argument("--ignore-robots", action="store_true",
                         help="Skip robots.txt checking (not recommended)")
     parser.add_argument("--emails-only", action="store_true",
-                        help="Only keep companies that have an email address")
+                        help="Only keep companies with an email they actually published")
     parser.add_argument("--high-confidence-only", action="store_true",
                         help="Only keep companies with a real (non-guessed) email or WhatsApp")
-    parser.add_argument("--no-guess-email", action="store_true",
-                        help=f"Don't fall back to {GUESSED_LOCAL_PART}@domain when no address is published")
+    parser.add_argument("--guess-email", action="store_true",
+                        help=f"Fall back to {GUESSED_LOCAL_PART}@domain when no address is "
+                             "published. Unverified — these addresses will bounce")
+    parser.add_argument("--ignore-free-mail", action="store_true",
+                        help="Drop gmail/yahoo/hotmail/outlook addresses (kept by default)")
+    parser.add_argument("--no-follow-contact", action="store_true",
+                        help="Don't follow 'Kontak' / 'Contact' links when a page has no email")
     args = parser.parse_args()
+
+    set_free_mail_filter(args.ignore_free_mail)
 
     try:
         with open(args.input_file, "r", encoding="utf-8") as f:
@@ -437,11 +743,18 @@ def main():
         sys.exit(1)
 
     print(f"Loaded {len(urls)} URL(s).\n")
-    results = scrape_urls(urls, respect_robots=not args.ignore_robots, delay=args.delay)
-    rows = results_to_rows(results, guess_email=not args.no_guess_email)
+    results = scrape_urls(urls, respect_robots=not args.ignore_robots, delay=args.delay,
+                          follow_contact=not args.no_follow_contact)
+    rows = results_to_rows(results, guess_email=args.guess_email)
+
+    if args.ignore_free_mail:
+        print(f"\nDropped {dropped_free_mail_count()} free-mail address(es) "
+              "(--ignore-free-mail).")
 
     if args.emails_only:
-        rows = [r for r in rows if r["email"]]
+        # "found" only: the flag promises real addresses, and a guessed one is
+        # truthy without being real.
+        rows = [r for r in rows if r["email_source"] == "found"]
     elif args.high_confidence_only:
         rows = [r for r in rows if r["email_source"] == "found" or r["whatsapp"]]
         for row in rows:

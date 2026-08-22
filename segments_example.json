@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Fan-out config for --expand. JSON rather than YAML so no new dependency",
+    "is needed. Every template x segment x city combination becomes one query,",
+    "with `suffix` appended to each.",
+    "",
+    "3 templates x 3 segments x 7 cities = 63 queries. At --num-results 100",
+    "that is 126 Serper credits, so check the estimate before running.",
+    "",
+    "Copy this file, edit it, and pass it with:",
+    "  python main.py --expand my_segments.json --num-results 100 --save-yield yield.csv",
+    "",
+    "Watch the BARU column in the yield table: once it trends toward zero the",
+    "segment is exhausted and more queries of the same shape only buy overlap."
+  ],
+
+  "name": "hospitality_jawa_bali",
+
+  "templates": [
+    "{segment} {city} kontak",
+    "{segment} {city} hubungi kami",
+    "{segment} {city} email reservasi"
+  ],
+
+  "segments": [
+    "hotel bintang 5",
+    "hotel bintang 4",
+    "resort"
+  ],
+
+  "cities": [
+    "Surabaya",
+    "Bandung",
+    "Semarang",
+    "Yogyakarta",
+    "Malang",
+    "Denpasar",
+    "Ubud"
+  ],
+
+  "suffix": "site:*.co.id OR site:*.id"
+}
