@@ -7,7 +7,7 @@ emails / WhatsApp numbers / phone numbers, and encrypt the output at rest.
   queries.txt
       |
       v
-  [1] google_search_scrapper.py   search engine -> result URLs
+  [1] serper_search.py            Serper.dev API -> result URLs
       |
       v
   [2] email_parser.py             fetch each page -> emails, WhatsApp, phones
@@ -23,7 +23,7 @@ emails / WhatsApp numbers / phone numbers, and encrypt the output at rest.
 
 ---
 
-All five `.py` files must sit in the same directory — they import each other.
+All the `.py` files must sit in the same directory — they import each other.
 Setup is `pip install -r requirements.txt` plus one password in `.env`; the
 walkthrough below covers both.
 
@@ -176,16 +176,17 @@ python main.py queries.txt --batch --num-results 20 --encrypt -o hospitality.csv
 
 ---
 
-## The five modules
+## The modules
 
 | File | Role | Standalone CLI |
 |---|---|---|
-| `google_search_scrapper.py` | Stage 1 — turns queries into URLs. Pagination, retry/backoff, caching, CSV/JSON/SQLite export. | Yes |
+| `serper_search.py` | Stage 1 (default) — turns queries into URLs via the Serper.dev API. One call per query, credit accounting, caching. | Yes |
+| `google_search_scrapper.py` | Stage 1 fallback — scraped Bing/Google. Kept for reference; returns the wrong data, see the reality check below. | Yes |
 | `email_parser.py` | Stage 2 — fetches pages, extracts contacts, respects `robots.txt`. | Yes |
 | `encrypt.py` | Stage 3 — password-based encryption. Owns the key-derivation function, loads `.env`. | Yes |
 | `decrypt.py` | Reads encrypted output back. Imports the KDF from `encrypt.py`. | Yes |
 | `main.py` | Orchestrates 1 -> 2 -> 3 with stage-skipping flags. | Yes |
-| `.env` / `.env.example` | Secrets (`SCRAPER_PASSWORD`, optional `GOOGLE_API_KEY`/`GOOGLE_CSE_ID`). `.env` is gitignored. | — |
+| `.env` / `.env.example` | Secrets (`SCRAPER_PASSWORD`, `SERPER_API_KEY`). `.env` is gitignored. | — |
 
 ---
 
@@ -201,7 +202,7 @@ a single row holding the union of everything found on them.
 | `whatsapp` | From `wa.me/…` / `api.whatsapp.com/send?phone=…` links, normalized to `+62…` |
 | `website` | A page actually read, when there was one |
 | `email_source` | **`found`** = published on the site. **`guessed`** = synthesized, see below |
-| `phone` | Low confidence — digit strings from page text. May be landlines or fax |
+| `phone` | Low confidence — mobile-shaped digit strings from page text, length-checked |
 | `other_emails` / `other_whatsapp` | Everything else found, `;`-separated |
 | `search_query` | The query that surfaced this company |
 | `status` | `ok`, or why the page was skipped (`blocked by robots.txt`, `403`, …) |
@@ -211,38 +212,54 @@ one value, and a WhatsApp number is never repeated as a low-confidence `phone`.
 
 ### Guessed emails — read this
 
-When a site publishes no usable address, the row falls back to
-`cs@<domain>` and is marked **`email_source = guessed`**.
+**Nothing is invented by default.** A site that publishes no usable address gets
+an empty `email` column. `--guess-email` opts into a `cs@<domain>` fallback,
+and those rows are marked **`email_source = guessed`**.
 
-These addresses are **invented, not discovered.** Nobody confirmed they exist.
+Guessed addresses are **invented, not discovered.** Nobody confirmed they exist.
 Sending to them risks hard bounces, and enough bounces will damage your sending
-domain's reputation for every campaign afterwards. Treat `guessed` rows as
-*leads to verify*, never as a mailing list:
+domain's reputation for every campaign afterwards. A `cs@` guess may also land
+in a real person's inbox who was never the intended recipient. Treat `guessed`
+rows as *leads to verify*, never as a mailing list:
 
 ```bash
-# Only companies with an address they actually published
-python main.py queries.txt --batch --high-confidence-only
+# Default — no address is ever synthesized
+python main.py queries.txt --batch
 
-# Turn the fallback off entirely
-python main.py queries.txt --batch --no-guess-email
+# Opt in to the cs@domain fallback (unverified, will bounce)
+python main.py queries.txt --batch --guess-email
 ```
 
 Sort by `email_source` in Excel and the guessed rows group together.
 
-### Gmail is dropped
+### Free-mail addresses are kept
 
-Addresses at `gmail.com` are filtered out — a personal inbox usually belongs to
-an individual rather than the business. Note the interaction: if a company's
-*only* published address is Gmail, it is discarded and that row falls back to a
-guessed `cs@` address. To keep them, or to also drop Yahoo/Hotmail, edit
-`IGNORED_EMAIL_DOMAINS` in `email_parser.py`.
+Addresses at `gmail.com` and friends are **kept by default.** Plenty of
+legitimate Indonesian businesses — konveksi, distributors, small manufacturers —
+publish a Gmail address as their only business contact, so dropping them removes
+real prospects.
+
+`--ignore-free-mail` filters `gmail.com`, `yahoo.com`, `yahoo.co.id`,
+`hotmail.com` and `outlook.com`, and prints how many addresses it dropped so the
+loss is visible rather than silent.
+
+### Phone numbers are length-checked
+
+`phone` values are validated against the real Indonesian mobile format —
+`+62` followed by 9-12 subscriber digits, so 11-14 digits in total. Shorter
+digit runs are price fragments and truncated IDs that merely look phone-shaped,
+and they are discarded.
+
+WhatsApp numbers from `wa.me` links skip this check: a `wa.me` href is the site
+explicitly stating the number is reachable.
 
 ### Filters
 
 ```bash
---emails-only             # only companies that have an email at all
+--emails-only             # only companies that published a real address (email_source == found)
 --high-confidence-only    # only real (non-guessed) emails, or a WhatsApp number
---no-guess-email          # never synthesize cs@domain
+--guess-email             # opt in to synthesizing cs@domain (off by default)
+--ignore-free-mail        # drop gmail/yahoo/hotmail/outlook (kept by default)
 ```
 
 ---
@@ -255,6 +272,15 @@ guessed `cs@` address. To keep them, or to also drop Yahoo/Hotmail, edit
 --skip-search             # input file is already a URL list; skip stage 1
 --batch                   # input file is a list of search queries
 --save-urls urls.csv      # also keep the raw search results
+```
+
+**Query quality** — the biggest lever on output quality
+```bash
+--blocklist blocklist.txt # aggregator domains to drop before fetching (default)
+--no-blocklist            # don't filter aggregators at all
+--no-negative-ops         # don't add -site: operators to queries
+--expand segments.json    # fan out templates x segments x cities into many queries
+--save-yield yield.csv    # per-query URLs / new / contacts
 ```
 
 **Rate limiting** — raise these if you start getting blocked
@@ -310,23 +336,107 @@ that shouldn't leave decrypted contact data lying around.
 
 ## Search engine reality check
 
-The default engine is **Bing**, not Google. This is not a preference — Google
-stopped serving result HTML to plain HTTP clients. `www.google.com/search`
-returns a JavaScript bootstrap page with no result markup at all, so no CSS
-selector can extract anything from it. Running `--engine google` will detect
-that wall and tell you, rather than silently reporting zero results.
+The default engine is **Serper.dev**, which needs `SERPER_API_KEY` in `.env`.
+Setup, credit model and cost are in [SEARCH_BACKEND.md](SEARCH_BACKEND.md).
 
-If searches start returning nothing:
+On a **free** Serper account, leave `--num-results` at the default 10: the
+organic list caps near 10 whatever you ask for, so a larger value costs credits
+without returning more, and combining it with `-site:` operators is rejected
+outright. Both limits were measured, not documented.
 
-1. Increase `--search-delay` and wait a while — you're likely rate-limited
-2. Check whether the HTML structure changed (the parser targets `li.b_algo`)
-3. For anything production-facing, **switch to an official API** —
-   see `GOOGLE_API_SETUP.md`
+Scraping search engines was tried first and does not work:
 
-Scraping SERPs violates the terms of service of both Google and Bing, and gets
-less reliable over time as anti-bot measures tighten. That's fine for occasional
-research; it's a poor foundation for a commercial pipeline. The Custom Search
-JSON API gives you the same URLs, legitimately, for free at low volume.
+- **Bing** (`--engine bing`) returns results for *other people's queries*.
+  Measured on real runs: `hotel bintang 5 Bali kontak` returned eight Surabaya
+  pages, and `pabrik Jawa Timur kontak` returned a doctor in Qatar. Search
+  operators are discarded — `-site:booking.com` still returns booking.com. The
+  responses are HTTP 200 with plausible-looking markup, so the failure is
+  invisible unless you read the output. Bing's `robots.txt` also disallows
+  `/search`.
+- **Google** (`--engine google`) serves a JavaScript bootstrap page with no
+  result markup. No selector can extract anything from it. The code detects
+  this wall and says so rather than reporting zero results.
+- **Google Custom Search JSON API** has been closed to new customers since
+  2025 and shuts down entirely on 1 January 2027. You cannot sign up.
+
+Both scraper backends are kept in the tree, but there is **no automatic
+fallback** to them. Running out of Serper credit stops the run and says so —
+silently downgrading to a backend that returns the wrong data is worse than a
+clear failure.
+
+Serper itself is a third-party service that scrapes Google, not an official
+Google API, and that category faces legal pressure from Google. The backend is
+one class behind a two-method interface, so it can be swapped.
+
+---
+
+## Query quality
+
+Most search results are structurally incapable of yielding a contact. An OTA
+exists to be the intermediary, so it will never publish the hotel's direct
+address; a social profile is not a company website. Measured on a real run,
+6 of 8 results for `hotel bintang 5 Bali` were OTAs and they yielded **zero**
+emails.
+
+Two mechanisms handle this, and they work at different points:
+
+| | When it acts | What it costs |
+|---|---|---|
+| `blocklist.txt` | after the search, before fetching | nothing — but the credit is already spent |
+| `-site:` operators | inside the query | nothing, and the slots go to real sites instead |
+
+`blocklist.txt` is **not** a quality filter. Every entry is a domain that
+cannot structurally have a direct contact. Do not add a domain because its
+results disappointed you, and do not generate the list from run output —
+legitimate sites get dropped that way.
+
+The drop count is always reported:
+
+```
+[STAGE 1] 200 URL ditemukan | 26 agregator dibuang | 174 akan di-fetch
+```
+
+If more than half the results are dropped, **the query is the problem**, not the
+blocklist. Fix the query.
+
+### The negative-operator tradeoff
+
+Operators are capped at six — a longer tail measurably degrades the results.
+Measured over 20 queries at `--num-results 10`:
+
+| Configuration | URLs | Relevant | Non-aggregator | Usable URLs |
+|---|---|---|---|---|
+| Neither | 179 | 94% | 69% | 125 |
+| Blocklist only | 127 | **96%** | 100% | 127 |
+| Blocklist + operators (default) | 174 | 82% | 100% | **174** |
+
+Operators free up the result slots that aggregators would have taken, so you get
+37% more usable URLs for the same credits — but 18% of them are off-topic rather
+than 4%. On absolute yield of good URLs the default still wins (≈143 vs ≈122).
+If you would rather have a smaller, cleaner set, use `--no-negative-ops`.
+
+### Fan-out
+
+One deep query cannot produce a thousand contacts — engines cap the depth. Many
+narrow queries can. `--expand` takes a JSON config (see
+[segments_example.json](segments_example.json)) and expands
+templates × segments × cities:
+
+```bash
+python main.py --expand segments.json --num-results 100 --save-yield yield.csv
+```
+
+Watch the `BARU` column in the yield table. Once it trends toward zero, that
+segment is exhausted and more queries of the same shape only buy overlap.
+
+### Measuring
+
+```bash
+python audit_output.py contacts.csv
+```
+
+Relevance is a heuristic — it cannot tell a real hotel page from an article
+about hotels. It is stable across runs, so compare the trend, not the absolute.
 
 ---
 

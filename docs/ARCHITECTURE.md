@@ -61,7 +61,22 @@ adding a field, not updating every call site's unpacking.
 
 `extract_contacts(html)` is deliberately separated from `scrape_url(url)`: the
 former does no network I/O, so extraction logic is unit-testable against HTML
-fixtures without hitting a live site.
+fixtures without hitting a live site. `test_email_parser.py` exercises it, and
+the fetch path, entirely offline.
+
+### Stage 3 grouping key
+
+`results_to_rows()` collapses results to one row per **host** (`site_host()`),
+not per registrable domain. The registrable domain looks like the natural key
+and isn't: it merges two unrelated businesses that happen to share
+`blogspot.com` — discarding one company's name outright and demoting its email
+into `other_emails`, where nothing marks it as belonging to someone else — and
+it merges `bandung.el-hotels.com` with `jakarta.el-hotels.com`, which are
+separate sales targets with separate reservations desks. Several pages of one
+host still merge, which is the whole point of the wide row shape.
+
+`registrable_domain()` stays: `guess_email_from_url()` needs it, because a
+guessed address belongs at the parent domain, not at a subdomain.
 
 ---
 
@@ -139,6 +154,23 @@ Emails are filtered against asset extensions (`logo@2x.png` matches a naive emai
 regex) and a placeholder blocklist (`example@example.com` and friends appear in
 almost every website template).
 
+`script`, `style`, `noscript` and `template` elements are removed before the
+email and phone regexes run: analytics config, JSON-LD vendor fields and CSS
+comments all contain @-strings, and a vendor's `noreply@` is short enough that
+`pick_primary_email()` would prefer it to the real address. The remaining
+**markup** is scanned, not `get_text()` — `mailto:` and `wa.me` live in `href`
+attributes, which text-only extraction throws away.
+
+Free-mail addresses (`gmail.com` and friends) are **kept** by default. Dropping
+them looks tidy and costs real prospects: for the Indonesian mid-market this
+targets, a Gmail address is routinely the only business contact a company
+publishes. `--ignore-free-mail` opts into filtering, and reports the count it
+dropped rather than losing them silently.
+
+No address is synthesized unless `--guess-email` asks for it. A guessed
+`cs@<domain>` is unverified by construction, and mailing unverified addresses
+buys hard bounces and a throttled sending domain.
+
 ---
 
 ## Politeness and blocking
@@ -146,11 +178,23 @@ almost every website template).
 - `robots.txt` is checked before each fetch, with results cached per domain so a
   50-page crawl of one site fetches `robots.txt` once. It **fails open** — if
   `robots.txt` is missing or unreachable, the fetch proceeds, since most small
-  business sites don't publish one.
+  business sites don't publish one. It is fetched with `requests` and an explicit
+  timeout rather than `RobotFileParser.read()`, which calls `urlopen` with no
+  timeout: a host that accepts the connection and never answers would hang an
+  unattended run forever, and a hang is not an exception, so no `try/except`
+  catches it.
 - `--ignore-robots` exists but is documented as not recommended.
 - Delays are configurable at both stages and default to conservative values.
 - The search scraper backs off exponentially on HTTP 429/503 rather than
   hammering through a rate limit.
+- Page fetches retry twice, 2s then 4s, on `ConnectionError` and `Timeout` only.
+  A momentary DNS blip shouldn't cost a URL for an entire run; an HTTP 4xx is a
+  real answer and is never retried. Same shape as
+  `google_search_scrapper._fetch()` — one retry idiom in the project, not two.
+- Response bodies are streamed and capped at 5 MB (`MAX_RESPONSE_BYTES`), with
+  the content-type checked before the body is read, so a non-HTML response costs
+  headers only. Over the cap the row records `response too large` instead of
+  reading an archive into memory.
 - Failed searches are **never cached** — otherwise one blocked run poisons every
   subsequent run from the cache.
 
@@ -162,10 +206,23 @@ almost every website template).
 "click to reveal" control, won't be found. Fixing this means Playwright/Selenium,
 which is a substantially heavier dependency and slower per page.
 
-**No contact-page discovery.** The parser only reads the exact URL given. A
-homepage that links to `/kontak` won't be followed. Adding a one-level crawl to
-likely contact pages (`/contact`, `/kontak`, `/about`, `/hubungi-kami`) is the
-single highest-value improvement available.
+**Contact-page discovery is one level and link-driven.** When a page publishes
+no email, the contact pages it *links to* are followed — same host, at most
+`MAX_CONTACT_PAGES` (2), ranked by how directly the link says "contact"
+(`kontak` > `contact` > `hubungi` > `tentang`/`about`), and the loop stops as
+soon as an address turns up.
+
+Links, not guessed paths. Trying `/kontak`, `/contact`, `/about` blind spends a
+request per guess on every site that spells it differently, and mostly earns
+404s — `hotel.co.id/kontak` and `hotelsurabaya.id/kontak` both 404 while their
+real pages are `/contact` and `/tentang`. Reading the site's own navigation
+costs nothing extra and follows whatever it actually calls that page.
+
+What it still misses: a homepage whose navigation is rendered client-side has no
+`<a href>` to read, and a contact page holding only a web form publishes no
+address to extract. Both were observed while validating this — `indofood.com`
+and `sidomunculstore.com` link their contact pages correctly and those pages
+carry no address at all.
 
 **Obfuscated emails are missed.** `info [at] company [dot] com` and image-based
 addresses don't match the regex. Deliberate — these are explicit signals the

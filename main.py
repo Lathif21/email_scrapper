@@ -2,7 +2,7 @@
 """
 main.py — end-to-end contact research pipeline.
 
-    search query  ->  google_search_scrapper  ->  URLs
+    search query  ->  serper_search           ->  URLs
                   ->  email_parser            ->  contacts
                   ->  encrypt                 ->  contacts.csv.enc
 
@@ -19,12 +19,43 @@ Usage:
     # Keep the intermediate search results too
     python main.py queries.txt --batch --save-urls urls.csv
 
-    # Only high-confidence contacts (email + explicit WhatsApp links)
-    python main.py "pabrik Cikarang" --high-confidence-only
+    # Only companies that published a real address
+    python main.py "pabrik Cikarang" --emails-only
+
+Contact defaults:
+    No address is invented. --guess-email opts into the cs@<domain> fallback,
+    and those addresses are unverified — they will bounce, and bounces cost
+    sending reputation. --emails-only keeps published addresses only.
+    Free-mail addresses (gmail.com and friends) are kept; --ignore-free-mail
+    filters them out.
+    When a page publishes no email, its "Kontak" / "Contact" links are followed
+    one level (max 2 pages, same host). --no-follow-contact turns that off.
 
 Stage flags:
     --skip-search   input file is already a list of URLs (skip stage 1)
     --dry-run       run stage 1 only, print URLs, then stop
+
+Query quality:
+    Aggregator domains (OTAs, social profiles, marketplaces) cannot publish a
+    direct company contact, so blocklist.txt drops them after the search and
+    -site: operators keep them out of it. The number dropped is always printed:
+    if it exceeds half the results, fix the query rather than growing the list.
+    --no-blocklist and --no-negative-ops turn each off.
+
+    --expand takes a JSON config and fans one template out over segments and
+    cities. --save-yield records URLs / new / contacts per query, which is what
+    tells you a segment is exhausted.
+
+Search backend:
+    Defaults to --engine serper, which needs SERPER_API_KEY in .env (see
+    SEARCH_BACKEND.md). Serper costs credits: 1 per query at --num-results 10
+    or less, 2 above that, and one call covers up to 100 results — so a large
+    --num-results is cheaper per result than several small runs.
+
+    --engine bing still works but returns results for other people's queries
+    and ignores search operators, so its output looks real while being wrong.
+    There is no automatic fallback to it: running out of credit stops the run
+    and says so.
 
 Password (for --encrypt) resolves in this order:
     1. --password argument
@@ -39,6 +70,7 @@ import time
 
 import email_parser
 import google_search_scrapper as searcher
+import query_tools
 from encrypt import encrypt_file, resolve_password
 
 
@@ -50,19 +82,97 @@ BANNER = r"""
 """
 
 
-def stage_search(args) -> list:
-    """Stage 1: run searches, return a list of (url, query) pairs."""
+def _confirm_credit_spend(estimate: int, args) -> bool:
+    """Ask before a large Serper spend. True to proceed.
+
+    Serper's API does not report the remaining balance — the response only
+    carries rate-limit headers and the cost of the call just made — so the
+    threshold is local, not a real balance check. Anything at or below it
+    proceeds silently.
+    """
+    if args.yes or estimate <= args.credit_budget:
+        return True
+
+    print(f"Estimasi {estimate} kredit melebihi --credit-budget "
+          f"({args.credit_budget}).")
+    try:
+        answer = input("Lanjutkan? [y/N] ").strip().lower()
+    except EOFError:
+        # Non-interactive run: decline rather than spend unattended.
+        print("(stdin tidak interaktif — dianggap 'no')")
+        return False
+    return answer in ("y", "yes")
+
+
+def stage_search(args) -> tuple:
+    """Stage 1: run searches.
+
+    Returns (pairs, tracker) — pairs is a list of (url, query), tracker holds
+    the per-query yield. Every exit path returns both, so the caller can unpack
+    unconditionally.
+    """
     print("[STAGE 1/3] Search")
     print("-" * 52)
 
-    if args.batch:
+    if args.expand:
+        try:
+            config = query_tools.load_expansion_config(args.expand)
+        except (OSError, ValueError) as e:
+            print(f"Error: tidak bisa membaca '{args.expand}': {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        queries = query_tools.expand_queries(config)
+        if not queries:
+            print(f"Error: '{args.expand}' menghasilkan nol query. Periksa "
+                  "'templates', 'segments' dan 'cities'.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Fan-out '{config.get('name', args.expand)}': {len(queries)} query "
+              f"dari {len(config.get('templates') or [])} template x "
+              f"{len(config.get('segments') or [])} segmen x "
+              f"{len(config.get('cities') or [])} kota")
+    elif args.batch:
         queries = searcher.load_queries_from_file(args.query)
-        print(f"Loaded {len(queries)} query/queries from '{args.query}'\n")
+        print(f"Loaded {len(queries)} query/queries from '{args.query}'")
     else:
         queries = [args.query]
 
-    cache_file = ".search_cache.json" if args.cache else None
-    scraper = searcher.SearchScraper(engine=args.engine, cache_file=cache_file)
+    # Loaded before the search: the blocklist also seeds the negative
+    # operators, which have to go into the query itself.
+    blocklist = (set() if args.no_blocklist
+                 else query_tools.load_blocklist(args.blocklist))
+    if blocklist:
+        print(f"Blocklist: {len(blocklist)} domain dari '{args.blocklist}'")
+    elif not args.no_blocklist:
+        print(f"Blocklist: '{args.blocklist}' tidak ditemukan — tidak menyaring")
+
+    if args.negative_ops and blocklist:
+        seeds = query_tools.top_blocked_domains({}, blocklist=blocklist)
+        queries = [query_tools.add_negative_operators(q, seeds) for q in queries]
+        print(f"Operator negatif: {', '.join(seeds)}")
+    print()
+
+    if args.engine == "serper":
+        # Imported inside the branch so Bing users need no credentials.
+        from serper_search import (SerperSearch, SerperAuthError,
+                                   estimate_credits)
+        cache_file = ".serper_cache.json" if args.cache else None
+        try:
+            scraper = SerperSearch(cache_file=cache_file)
+        except SerperAuthError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        estimate = estimate_credits(len(queries), args.num_results)
+        print(f"{len(queries)} query x {args.num_results} hasil = "
+              f"~{estimate} kredit (trial gratis: 2.500)")
+        if not _confirm_credit_spend(estimate, args):
+            print("Dibatalkan.")
+            sys.exit(1)
+        print()
+    else:
+        cache_file = ".search_cache.json" if args.cache else None
+        scraper = searcher.SearchScraper(engine=args.engine,
+                                         cache_file=cache_file)
 
     results = scraper.search_many(
         queries,
@@ -70,25 +180,60 @@ def stage_search(args) -> list:
         delay=args.search_delay,
     )
 
+    if args.engine == "serper":
+        print(f"Kredit terpakai: {scraper.credits_used} "
+              "(estimasi lokal, bukan saldo resmi Serper)")
+
     if not results:
         print("No search results. Nothing to scrape.")
-        print("If the engine is blocking you, wait and retry with a higher --search-delay,")
-        print("or switch to the Google Custom Search JSON API (see GOOGLE_API_SETUP.md).")
-        return []
+        print("Check the query first. If the backend is refusing you, see")
+        print("SEARCH_BACKEND.md — running out of Serper credit says so explicitly.")
+        return [], query_tools.YieldTracker()
+
+    found = len(results)
+    results, dropped, dropped_by_host = query_tools.filter_blocked(results, blocklist)
+    print(f"[STAGE 1] {found} URL ditemukan | {dropped} agregator dibuang | "
+          f"{len(results)} akan di-fetch")
+
+    if dropped_by_host:
+        top = sorted(dropped_by_host.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+        print("  Terbanyak: " + ", ".join(f"{h} ({c})" for h, c in top))
+        if found and dropped / found > 0.5:
+            # A high drop rate is a signal about the query, not the blocklist.
+            print("  [!] Lebih dari separuh hasil terbuang — perbaiki query-nya, "
+                  "jangan perbesar blocklist.")
+        suggest = query_tools.top_blocked_domains(dropped_by_host,
+                                                  blocklist=blocklist)
+        print("  Saran untuk run berikutnya: "
+              + " ".join(f"-site:{d}" for d in suggest))
+
+    if not results:
+        print("Semua hasil terbuang oleh blocklist. Perbaiki query, atau "
+              "jalankan dengan --no-blocklist.")
+        return [], query_tools.YieldTracker()
 
     if args.save_urls:
         searcher.export_csv(results, args.save_urls)
 
     # Keep the query that produced each URL so it survives into the final CSV.
     pairs, seen = [], set()
+    by_query = {}
     for result in results:
         url = result.get("url", "")
-        if url and url not in seen:
+        if not url:
+            continue
+        by_query.setdefault(result.get("query", ""), []).append(url)
+        if url not in seen:
             seen.add(url)
             pairs.append((url, result.get("query", "")))
 
+    # Yield per query — this is what tells you a segment is exhausted.
+    tracker = query_tools.YieldTracker()
+    for query in queries:
+        tracker.record(query, by_query.get(query, []))
+
     print(f"Collected {len(pairs)} unique URL(s) from {len(queries)} query/queries.\n")
-    return pairs
+    return pairs, tracker
 
 
 def load_urls_from_file(path: str) -> list:
@@ -114,17 +259,24 @@ def stage_parse(pairs: list, args) -> list:
         urls,
         respect_robots=not args.ignore_robots,
         delay=args.scrape_delay,
+        follow_contact=not args.no_follow_contact,
     )
 
     extra_by_url = {url: {"search_query": query_by_url.get(url, "")} for url in urls}
     rows = email_parser.results_to_rows(
         results,
         extra_by_url=extra_by_url,
-        guess_email=not args.no_guess_email,
+        guess_email=args.guess_email,
     )
 
+    if args.ignore_free_mail:
+        print(f"\nDropped {email_parser.dropped_free_mail_count()} free-mail "
+              "address(es) (--ignore-free-mail).")
+
     if args.emails_only:
-        rows = [r for r in rows if r["email"]]
+        # "found" only: the flag promises real addresses, and a guessed one is
+        # truthy without being real.
+        rows = [r for r in rows if r["email_source"] == "found"]
     elif args.high_confidence_only:
         rows = [r for r in rows if r["email_source"] == "found" or r["whatsapp"]]
         # A row kept purely for its verified WhatsApp number must not smuggle an
@@ -134,6 +286,7 @@ def stage_parse(pairs: list, args) -> list:
                 row["email"] = ""
                 row["email_source"] = ""
 
+    followed = sum(1 for r in results if r.followed)
     found = sum(1 for r in rows if r["email_source"] == "found")
     guessed = sum(1 for r in rows if r["email_source"] == "guessed")
     with_wa = sum(1 for r in rows if r["whatsapp"])
@@ -142,6 +295,8 @@ def stage_parse(pairs: list, args) -> list:
     print(f"    email (found)     {found}")
     print(f"    email (guessed)   {guessed}")
     print(f"    whatsapp          {with_wa}")
+    if followed:
+        print(f"    contact pages read {followed}")
     if not rows:
         print("    (none)")
     print()
@@ -189,8 +344,16 @@ def main():
                         help="Run search only, print the URLs, then stop")
 
     # --- search options ---
-    parser.add_argument("--engine", choices=["bing", "google"], default="bing",
-                        help="Search backend (default: bing; google is blocked without JS)")
+    parser.add_argument("--engine", choices=["serper", "bing", "google"],
+                        default="serper",
+                        help="Search backend (default: serper). bing returns "
+                             "results for other people's queries; google is "
+                             "blocked without JS")
+    parser.add_argument("--credit-budget", type=int, default=100, metavar="N",
+                        help="Ask for confirmation above this many estimated "
+                             "Serper credits (default: 100)")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip the Serper credit confirmation prompt")
     parser.add_argument("--num-results", type=int, default=10,
                         help="Results per query (default: 10)")
     parser.add_argument("--search-delay", type=float, default=3,
@@ -200,17 +363,41 @@ def main():
     parser.add_argument("--save-urls", default=None, metavar="PATH",
                         help="Also save raw search results to this CSV")
 
+    # --- query quality ---
+    parser.add_argument("--blocklist", default=query_tools.DEFAULT_BLOCKLIST_FILE,
+                        metavar="PATH",
+                        help="Aggregator domain list to drop before fetching "
+                             f"(default: {query_tools.DEFAULT_BLOCKLIST_FILE})")
+    parser.add_argument("--no-blocklist", action="store_true",
+                        help="Don't filter aggregator domains at all")
+    parser.add_argument("--negative-ops", action="store_true", default=True,
+                        help="Add -site: operators for the top aggregators "
+                             "(default: on)")
+    parser.add_argument("--no-negative-ops", dest="negative_ops",
+                        action="store_false",
+                        help="Don't add -site: operators to queries")
+    parser.add_argument("--expand", default=None, metavar="PATH",
+                        help="JSON fan-out config: expand templates x segments "
+                             "x cities into many queries")
+    parser.add_argument("--save-yield", default=None, metavar="PATH",
+                        help="Write per-query yield (URLs / new / contacts) to CSV")
+
     # --- parse options ---
     parser.add_argument("--scrape-delay", type=float, default=2,
                         help="Seconds between page fetches (default: 2)")
     parser.add_argument("--ignore-robots", action="store_true",
                         help="Skip robots.txt checking (not recommended)")
     parser.add_argument("--emails-only", action="store_true",
-                        help="Only keep companies that have an email address")
+                        help="Only keep companies with an email they actually published")
     parser.add_argument("--high-confidence-only", action="store_true",
                         help="Only keep companies with a real (non-guessed) email or WhatsApp")
-    parser.add_argument("--no-guess-email", action="store_true",
-                        help="Don't fall back to cs@domain when a site publishes no address")
+    parser.add_argument("--guess-email", action="store_true",
+                        help="Fall back to cs@domain when a site publishes no address. "
+                             "Unverified — these addresses will bounce")
+    parser.add_argument("--ignore-free-mail", action="store_true",
+                        help="Drop gmail/yahoo/hotmail/outlook addresses (kept by default)")
+    parser.add_argument("--no-follow-contact", action="store_true",
+                        help="Don't follow 'Kontak' / 'Contact' links when a page has no email")
 
     # --- output options ---
     parser.add_argument("-o", "--output", default="contacts.csv",
@@ -222,8 +409,15 @@ def main():
 
     args = parser.parse_args()
 
+    email_parser.set_free_mail_filter(args.ignore_free_mail)
+
     if args.batch and args.skip_search:
         print("Error: --batch and --skip-search are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.expand and (args.batch or args.skip_search):
+        print("Error: --expand tidak bisa digabung dengan --batch atau "
+              "--skip-search.", file=sys.stderr)
         sys.exit(1)
 
     print(BANNER)
@@ -232,9 +426,10 @@ def main():
     # Stage 1
     if args.skip_search:
         pairs = load_urls_from_file(args.query)
+        tracker = None
         print(f"[STAGE 1/3] Skipped — loaded {len(pairs)} URL(s) from '{args.query}'\n")
     else:
-        pairs = stage_search(args)
+        pairs, tracker = stage_search(args)
 
     if not pairs:
         sys.exit(1)
@@ -242,12 +437,29 @@ def main():
     if args.dry_run:
         print("[DRY RUN] URLs that would be scraped:\n")
         for url, query in pairs:
-            print(f"  {url}" + (f"   <- {query}" if query else ""))
+            # Operators are identical on every line and already reported above.
+            label = query_tools.strip_negative_operators(query)
+            print(f"  {url}" + (f"   <- {label}" if label else ""))
         print(f"\n{len(pairs)} URL(s). Re-run without --dry-run to extract contacts.")
         return
 
     # Stage 2
     rows = stage_parse(pairs, args)
+
+    if tracker and tracker.rows:
+        contacts_by_query = {}
+        for row in rows:
+            if row["email_source"] == "found" or row["whatsapp"]:
+                # Key on the stripped query — YieldTracker stores it that way.
+                query = query_tools.strip_negative_operators(
+                    row.get("search_query", ""))
+                contacts_by_query[query] = contacts_by_query.get(query, 0) + 1
+        tracker.add_contacts(contacts_by_query)
+        print("Yield per query:")
+        tracker.print_table()
+        print()
+        if args.save_yield:
+            tracker.write_csv(args.save_yield)
 
     # Stage 3
     stage_output(rows, args)

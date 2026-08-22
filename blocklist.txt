@@ -1,0 +1,72 @@
+# blocklist.txt — hosts that cannot structurally publish a direct contact.
+#
+# One domain per line, '#' for comments. Matching is on host suffix at label
+# boundaries, so `trip.com` catches `id.trip.com` but not `nottrip.com`.
+#
+# This is NOT a quality filter. Every entry is here because the site's business
+# model or purpose makes a direct company contact impossible to find on it — an
+# OTA exists to be the intermediary, a social profile is not a company website.
+# Do NOT add a domain just because its results were disappointing, and do NOT
+# grow this file automatically from run output: legitimate sites get dropped
+# that way.
+#
+# Disable entirely with --no-blocklist, or point elsewhere with --blocklist PATH.
+
+# OTA / booking — never show the hotel's direct contact
+agoda.com
+booking.com
+traveloka.com
+tiket.com
+trip.com
+pegipegi.com
+expedia.com
+hotels.com
+airbnb.com
+tripadvisor.com
+tripadvisor.co.id
+trivago.com
+trivago.co.id
+reddoorz.com
+oyorooms.com
+
+# Directories & reviews
+yelp.com
+foursquare.com
+google.com
+yellowpages.co.id
+
+# Social & profiles
+facebook.com
+instagram.com
+linkedin.com
+twitter.com
+x.com
+youtube.com
+tiktok.com
+threads.com
+pinterest.com
+
+# Reference & archives
+wikipedia.org
+archive.org
+scribd.com
+researchgate.net
+academia.edu
+baidu.com
+zhihu.com
+quora.com
+medium.com
+
+# Marketplace
+tokopedia.com
+shopee.co.id
+bukalapak.com
+lazada.co.id
+amazon.com
+alibaba.com
+indotrading.com
+made-in-china.com
+
+# Data brokers — resell scraped profiles, no real company contact
+zoominfo.com
+doximity.com
