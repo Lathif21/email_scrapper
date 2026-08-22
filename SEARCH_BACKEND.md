@@ -3,8 +3,8 @@
 Stage 1 of the pipeline defaults to `--engine serper`. This file covers setup,
 the credit model, cost, and what you are actually buying.
 
-Replaces `GOOGLE_API_SETUP.md`, which documented an API you can no longer
-register for.
+Replaces `archive/GOOGLE_API_SETUP.md`, which documented an API you can no
+longer register for.
 
 ---
 

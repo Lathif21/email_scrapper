@@ -24,15 +24,24 @@ Didiagnosis dari output nyata (`bali.csv`, `contacts.csv`, Agustus 2026):
 
 Kerjakan berurutan. Setiap task punya syarat masuk dan kriteria selesai yang jelas.
 
-| # | Task | Status | Biaya | Kenapa urutannya begini |
-|---|---|---|---|---|
-| **01** | [`tasks/01_FIX_data_quality.md`](tasks/01_FIX_data_quality.md) | **Kerjakan pertama** | Rp 0 | Bug yang mengarang data dan membuang prospek. Gratis, dan tanpa ini kualitas tidak bisa diukur. |
-| **02** | [`tasks/02_MIGRASI_serper.md`](tasks/02_MIGRASI_serper.md) | **Kerjakan kedua** | Gratis 2.500 kredit | Memperbaiki penyebab utama sampah. Pakai free tier dulu — jangan bayar sebelum terukur. |
-| **03** | [`tasks/03_QUERY_quality.md`](tasks/03_QUERY_quality.md) | Kerjakan ketiga | Rp 0 | Filter agregator + fan-out. Pengaruhnya ke kualitas lebih besar daripada ganti engine. |
-| 04 | [`tasks/04_structured_extraction.md`](tasks/04_structured_extraction.md) | Tunda | Rp 0 | Berguna, tapi percuma kalau input-nya masih salah. |
-| 05 | [`tasks/05_resumable_search.md`](tasks/05_resumable_search.md) | Tunda | Rp 0 | Optimasi. Hanya relevan setelah 01-03 jalan. |
+| # | Task | Status | Biaya |
+|---|---|---|---|
+| 01 | [`01_FIX_data_quality.md`](01_FIX_data_quality.md) | SELESAI (`eaf3365`) | Rp 0 |
+| 02 | [`02_MIGRASI_serper.md`](02_MIGRASI_serper.md) | SELESAI (`eaf3365`) | gratis 2.500 kredit |
+| 03 | [`03_QUERY_quality.md`](03_QUERY_quality.md) | SELESAI (`eaf3365`) | Rp 0 |
+| 04 | [`04_audit_and_extraction.md`](04_audit_and_extraction.md) | SELESAI (`02f67e3`) | Rp 0 |
+| 05 | [`05_resumable_search.md`](05_resumable_search.md) | SELESAI (`81cf1bb`) | Rp 0 |
+| **06** | [`06_playwright_render.md`](06_playwright_render.md) | **Belum dikerjakan** | belum diukur |
 
-**Jangan lompat ke 04 atau 05 sebelum 01-03 selesai.** Keduanya mengoptimalkan pipeline yang saat ini menghasilkan data salah — mempercepat sesuatu yang keliru tidak menolong.
+Di luar task: satu commit perbaikan (`008a09f`) menangani deteksi halaman
+bot-check, pembacaan JSON-LD dan `tel:`, serta kegagalan senyap saat `--encrypt`
+tidak bisa menghapus plaintext.
+
+**216 test lolos.** Jalankan:
+
+```bash
+python -m unittest test_email_parser test_serper_search test_query_tools test_search_state
+```
 
 ---
 
@@ -51,7 +60,15 @@ python main.py "hotel bintang 5 Bali kontak" --num-results 20 -o test.csv
 | Nomor telepon valid | 29% | > 95% |
 | Baris dengan kontak asli | ~10% | > 40% |
 
-Skrip pengukurnya ada di `tasks/03_QUERY_quality.md` bagian "Skrip audit".
+Skrip pengukurnya adalah `audit_output.py` di root repo.
+
+> **Baseline relevansi lama tidak bisa dipercaya, dan sudah diperbaiki di Task 04.**
+> `audit_output.py` versi pertama melaporkan bali 75% relevan padahal kedelapan
+> hasilnya Surabaya sementara query meminta Bali — relevansi sebenarnya 0%.
+> Heuristiknya mencocokkan kata "hotel" dan mengabaikan "Bali". Task 04 Bagian A
+> menjadikan lokasi sebagai syarat mutlak, dan angkanya sekarang 0% dengan
+> metrik baru "Mismatch lokasi" 100%. Angka relevansi apa pun yang dicatat
+> sebelum `02f67e3` harus diabaikan.
 
 **Isi kolom hasil nyata Anda:**
 
@@ -97,23 +114,14 @@ Catatan pengukuran:
 
 ---
 
-## File yang harus dihapus
+## File mati
 
-Ada di `archive/` dengan alasannya masing-masing. Hapus dari root repo supaya tidak dikerjakan orang lain (atau Claude Code) secara tidak sengaja:
-
-```bash
-rm TASK_structured_extraction.md    # digantikan 04
-rm TASK_migrasi_google_api.md       # MATI — lihat di bawah
-rm FIX_email_scrapper.md            # digantikan 01
-rm TASK_extraction_and_export.md    # pindah ke tasks/04
-rm TASK_resumable_search.md         # pindah ke tasks/05
-rm GOOGLE_API_SETUP.md              # digantikan SEARCH_BACKEND.md
-rm ignored_url.txt                  # yatim, tidak dirujuk kode mana pun
-```
+Sudah dipindahkan ke `archive/` dengan alasannya masing-masing di
+`archive/README.md`. Tidak ada lagi yang perlu dihapus dari root.
 
 ### Kenapa spec Google API mati
 
-Google menutup Custom Search JSON API untuk pelanggan baru pada 2025, dan menghentikannya total pada 1 Januari 2027. Anda tidak bisa mendaftar sama sekali. Spec migrasi ke Google API tidak mungkin dijalankan — sudah diganti `tasks/02_MIGRASI_serper.md`.
+Google menutup Custom Search JSON API untuk pelanggan baru pada 2025, dan menghentikannya total pada 1 Januari 2027. Anda tidak bisa mendaftar sama sekali. Spec migrasi ke Google API tidak mungkin dijalankan — sudah diganti `docs/02_MIGRASI_serper.md`.
 
 ---
 
@@ -130,27 +138,33 @@ Berlaku untuk setiap perubahan kode di repo ini. Setiap task file mengulang ini 
 
 ---
 
-## Struktur repo setelah dirapikan
+## Struktur repo
 
 ```
-START_HERE.md              <- file ini
-README.md
-ARCHITECTURE.md
-COMPLIANCE.md
-SEARCH_BACKEND.md
-tasks/
-  01_FIX_data_quality.md
-  02_MIGRASI_serper.md
-  03_QUERY_quality.md
-  04_structured_extraction.md
-  05_resumable_search.md
+README.md                  <- cara pakai, flag, format output
+SEARCH_BACKEND.md          <- setup Serper, model kredit, batas akun free
+blocklist.txt              <- domain agregator
+segments_example.json      <- template fan-out untuk --expand
+docs/
+  START_HERE.md            <- file ini
+  ARCHITECTURE.md          <- keputusan desain + alasannya
+  COMPLIANCE.md            <- UU PDP, kebijakan WhatsApp
+  01_FIX_data_quality.md   <- SELESAI
+  02_MIGRASI_serper.md     <- SELESAI
+  03_QUERY_quality.md      <- SELESAI
+  04_audit_and_extraction.md <- SELESAI
+  05_resumable_search.md   <- SELESAI
+  06_playwright_render.md  <- belum dikerjakan
 archive/
   README.md                <- daftar file mati + alasannya
-main.py
-google_search_scrapper.py
-email_parser.py
-encrypt.py
-decrypt.py
-requirements.txt
-.env.example
+main.py                    <- orkestrasi 3 tahap
+serper_search.py           <- stage 1 (default)
+google_search_scrapper.py  <- stage 1 fallback, hasilnya salah
+email_parser.py            <- stage 2
+query_tools.py             <- blocklist, operator negatif, fan-out
+search_state.py            <- state resume (SQLite)
+audit_output.py            <- ukur kualitas CSV
+encrypt.py / decrypt.py    <- stage 3
+test_email_parser.py  test_serper_search.py
+test_query_tools.py   test_search_state.py
 ```

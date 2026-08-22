@@ -229,8 +229,11 @@ addresses don't match the regex. Deliberate — these are explicit signals the
 owner doesn't want automated collection.
 
 **SERP scraping is inherently fragile.** Selectors break when the engine changes
-its markup. This is a maintenance cost, not a bug, and it's the main argument for
-moving to an official API — see `GOOGLE_API_SETUP.md`.
+its markup. That was the maintenance argument for moving off it; the decisive
+argument turned out to be worse than fragility — scraped Bing returns results
+for *other people's* queries with HTTP 200, so the failure is invisible. Stage 1
+now defaults to the Serper API; see `../SEARCH_BACKEND.md`. The Bing code is
+kept as a fallback but produces wrong data.
 
 ---
 
