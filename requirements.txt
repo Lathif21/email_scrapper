@@ -2,3 +2,9 @@ requests>=2.31
 beautifulsoup4>=4.12
 cryptography>=42.0
 python-dotenv>=1.0
+
+# Optional — only needed for --render (Task 06). The pipeline runs fine without
+# it; --render stops with an install message instead of an ImportError.
+#     pip install playwright && playwright install chromium
+# The second command downloads the browser binary (~400 MB), once per machine.
+playwright>=1.40

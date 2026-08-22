@@ -162,9 +162,19 @@ def main():
         sys.exit(1)
 
     if args.preview is not None:
-        text = data.decode("utf-8", errors="replace")
-        for line in text.splitlines()[:args.preview]:
-            print(line)
+        # The CSV is written utf-8-sig so Excel opens it correctly, which puts a
+        # BOM on the first line. print() sends that through the console's own
+        # encoder, and on a Windows cp1252 console encoding U+FEFF raises
+        # UnicodeEncodeError — so --preview crashed on exactly the file this
+        # tool produces. Strip the BOM and write bytes the way --stdout already
+        # does, bypassing the console encoder entirely: any company name or
+        # address outside cp1252 would hit the same wall.
+        text = data.decode("utf-8", errors="replace").lstrip("﻿")
+        lines = text.splitlines()[:args.preview]
+        if lines:
+            sys.stdout.buffer.write(
+                ("\n".join(lines) + "\n").encode("utf-8", errors="replace"))
+            sys.stdout.buffer.flush()
         return
 
     if args.stdout:

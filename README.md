@@ -399,6 +399,64 @@ one class behind a two-method interface, so it can be swapped.
 
 ---
 
+## JavaScript-rendered pages (`--render`)
+
+Some sites build their contact details with JavaScript, or hide a number behind
+a "tampilkan nomor" button. `requests` will never see those. `--render` re-fetches
+just those pages through a real Chromium browser:
+
+```bash
+pip install playwright
+playwright install chromium        # ~400 MB, once per machine
+python main.py urls.txt --skip-search --render -o contacts.csv
+```
+
+**A fallback, not the default.** `requests` is 3-8x faster and most target sites
+are static, so rendering everything adds hours without adding contacts. A page is
+rendered only when **both** hold: it produced no contact, *and* it looks
+JS-built (under 5 KB, or an empty `#root`/`#app`/`#__next`, or a `<noscript>`
+saying JavaScript is required).
+
+Results are **merged**, never swapped: if the static pass found an email and the
+render finds a WhatsApp number, the row keeps both. A crash inside Playwright
+cannot lose what `requests` already retrieved.
+
+### What it will not do
+
+`robots.txt` is still checked before every fetch, including through the browser —
+a real browser does not change what a site permits. There is no
+`playwright-stealth`, no fingerprint rotation, no proxies, no CAPTCHA solving.
+
+**In particular this does not defeat anti-bot interstitials.** A site serving
+"One moment, please… verifying your request" is refusing automated access; those
+rows stay marked `bot check / interstitial` and are skipped. Adding stealth
+plugins from here is an arms race whose output is never stable enough to rely on.
+
+### Was it worth it? — the `render_mode` column
+
+| Value | Meaning |
+|---|---|
+| `static` | `requests` was enough |
+| `rendered` | Needed the browser, and it **added** a contact |
+| `rendered_empty` | Rendered anyway, still nothing |
+
+The stage summary prints the split:
+
+```
+    Static  :  10 halaman (  9 dapat kontak)
+    Render  :   2 halaman (1 dapat kontak, 1 tetap kosong)
+```
+
+Use it to decide whether to keep `--render` on. If `rendered` is under ~5% of
+rows, the flag is costing time for nothing — leave it off. Rendering takes 3-8
+seconds per page and Chromium uses 150-300 MB, so on a small VPS watch memory on
+the first batch.
+
+`--show-browser` runs it visibly when a render returns nothing and you need to
+see why. `--render-timeout MS` raises the 15 s default.
+
+---
+
 ## Resumable search
 
 Two runs of the same command collect *different* URLs instead of the same ones:

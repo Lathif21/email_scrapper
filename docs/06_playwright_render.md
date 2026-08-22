@@ -13,7 +13,7 @@ Sebagian situs memuat kontak lewat JavaScript, atau menyembunyikannya di balik t
 
 Playwright dipakai **hanya untuk halaman seperti itu**, bukan untuk semua halaman.
 
-**Kenapa fallback, bukan default:** `requests` 3-8x lebih cepat, dan mayoritas situs target statis. `konveksibandungjaya.id` sudah diuji — seluruh kontaknya (email, nomor, alamat) ada di HTML statis dan berhasil diekstrak tanpa browser. Merender 2.500 halaman dengan Chromium menambah berjam-jam tanpa menambah kontak.
+**Kenapa fallback, bukan default:** `requests` 3-8x lebih cepat, dan mayoritas situs target statis. `sariaterkamboti.com/contactus.html` sudah diuji — seluruh kontaknya (email, WhatsApp, alamat) ada di HTML statis dan berhasil diekstrak tanpa browser. Merender 2.500 halaman dengan Chromium menambah berjam-jam tanpa menambah kontak.
 
 ---
 
@@ -170,7 +170,7 @@ Tambahkan ke `test_email_parser.py`, plus `test_render_fetch.py` baru. **Tanpa j
 1. `needs_render()` False kalau halaman sudah punya kontak, meski HTML tipis.
 2. `needs_render()` True untuk `<div id="root"></div>` kosong tanpa kontak.
 3. `needs_render()` True untuk HTML < 5KB tanpa kontak.
-4. `needs_render()` False untuk halaman statis normal yang berisi kontak (fixture `konveksibandungjaya.id`).
+4. `needs_render()` False untuk halaman statis normal yang berisi kontak (fixture bergaya `sariaterkamboti.com`).
 5. `scrape_url(renderer=None)` — perilaku identik dengan sekarang.
 6. Hasil render digabung, bukan menggantikan: statis dapat email, render dapat WA, keduanya ada di hasil.
 7. Renderer melempar exception → hasil statis tetap dikembalikan, `render_mode` bukan `rendered`.

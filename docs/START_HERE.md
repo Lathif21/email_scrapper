@@ -31,7 +31,7 @@ Kerjakan berurutan. Setiap task punya syarat masuk dan kriteria selesai yang jel
 | 03 | [`03_QUERY_quality.md`](03_QUERY_quality.md) | SELESAI (`eaf3365`) | Rp 0 |
 | 04 | [`04_audit_and_extraction.md`](04_audit_and_extraction.md) | SELESAI (`02f67e3`) | Rp 0 |
 | 05 | [`05_resumable_search.md`](05_resumable_search.md) | SELESAI (`81cf1bb`) | Rp 0 |
-| **06** | [`06_playwright_render.md`](06_playwright_render.md) | **Belum dikerjakan** | belum diukur |
+| 06 | [`06_playwright_render.md`](06_playwright_render.md) | SELESAI — tapi terpicu 0% | Rp 0 (dependensi opsional) |
 
 Di luar task: satu commit perbaikan (`008a09f`) menangani deteksi halaman
 bot-check, pembacaan JSON-LD dan `tel:`, serta kegagalan senyap saat `--encrypt`
@@ -98,6 +98,16 @@ Catatan pengukuran:
 - Telepon valid 92% (target >95%) dan ada-kontak 38% (target >40%) masih kurang
   sedikit. Keduanya diukur dari sampel kecil (14 nomor, 34 baris); jalankan lagi
   dengan lebih banyak query sebelum menyimpulkan.
+- **Task 06 (--render)** — dua batch, 68 halaman total: 1 percobaan render, **0
+  berhasil menambah kontak**. `static` 98%, `rendered_empty` 1%, `rendered` 0%.
+  Ambang spec sendiri adalah "< 5% pertimbangkan mencabutnya", jadi fitur ini
+  dibiarkan ada dengan **default mati**: ongkosnya nol kalau tidak dipakai, dan
+  kolom `render_mode` akan langsung memberi datanya kalau nanti menyasar segmen
+  yang situsnya SPA. Yang sudah pasti: ia **tidak** menolong halaman bot-check —
+  diuji dengan Chromium menunggu 1,5s / 7s / 14s, interstitial tetap.
+- Situs Indonesia modern umumnya sudah SSR (Tokopedia, Ruparupa, Dekoruma,
+  Sociolla, Zalora semuanya menyajikan kontak di HTML statis), jadi SPA
+  client-only yang menyembunyikan kontak ternyata jarang.
 - Heuristik relevansi: kata benda utama query muncul di URL/title/domain. Tidak
   sempurna, tapi konsisten antar-run sehingga bisa dibandingkan.
 

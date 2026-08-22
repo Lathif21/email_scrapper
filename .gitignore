@@ -11,6 +11,7 @@
 !queries_example.txt
 !urls_example.txt
 !segments_example.json
+!docs/ground_truth_template.csv
 
 # Personal working query list — queries_example.txt is the committed template.
 queries.txt
@@ -33,6 +34,9 @@ env/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Artefak Tingkat 2 PANDUAN_TESTING
+uji/
 
 # Logs
 *.log

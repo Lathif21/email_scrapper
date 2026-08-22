@@ -311,3 +311,55 @@ the problem.
 **`error` is not in the skip list.** `--skip-scraped` skips `ok`,
 `robots_blocked` and `blocked_domain`. A transient failure must stay retryable
 rather than becoming a permanent blacklist entry.
+
+
+---
+
+## Render fallback (Task 06)
+
+`render_fetch.py` wraps Playwright/Chromium. Used for the minority of pages that
+build their contact details with JavaScript, or hide a number behind a
+"tampilkan nomor" button — content `requests` can never see.
+
+**A fallback, not the default.** `requests` is 3-8x faster and most target sites
+are static; `sariaterkamboti.com/contactus.html` was checked and publishes
+email, WhatsApp and address in static HTML. Rendering every page would add hours without adding contacts. So
+`needs_render()` requires BOTH conditions, cheapest first: the page produced no
+contact, AND it looks JS-built (under 5 KB, an empty framework root, or a
+`<noscript>` saying JavaScript is required). A page that already yielded a
+contact is never re-fetched, however SPA-shaped it looks.
+
+**One browser per batch.** Launching per URL is the usual mistake and the
+overhead dwarfs the render. The Renderer is a context manager and `main.py`
+wraps stage 2 in `try/finally`, so Chromium is closed even on Ctrl-C.
+
+**Image, font and media requests are aborted** — they never carry a contact and
+blocking them cuts render time by 50-70%.
+
+**`domcontentloaded` plus a fixed 1.5 s settle, never `networkidle`.** A site
+with polling or a chat widget never goes idle, so `networkidle` would hang every
+such page until the timeout.
+
+**One attempt.** `_fetch_page()` already retried with requests, so a page
+reaching the renderer has failed once; retrying again is waste.
+
+**Merged, never swapped.** Static email plus rendered WhatsApp keeps both, and
+the whole render block is wrapped so a Playwright bug cannot lose contacts that
+requests already retrieved.
+
+**Clicking is deliberately timid.** At most 3 clicks per page, only on labels
+matching a reveal pattern, and never on anything containing kirim / submit /
+daftar / beli / order / login / bayar / checkout. The forbidden list wins over a
+pattern match, so "Hubungi kami - kirim pesan" is not clicked. Clicking blindly
+on a stranger's site can submit a form or place an order.
+
+**Not a bot-detection bypass.** `robots.txt` is checked before the render too — a
+real browser does not change what a site permits. No stealth plugin, no
+fingerprint rotation, no proxies, no CAPTCHA solving. Anti-bot interstitials stay
+skipped and keep their `bot check / interstitial` status; going further is an
+arms race whose output is never stable enough to depend on.
+
+**`render_mode` is the decision column.** `static` / `rendered` /
+`rendered_empty`, where `rendered` means the browser actually added a contact. If
+`rendered` stays under ~5% of rows, the flag costs time for nothing and should be
+left off — the column exists so that is a measurement rather than a guess.

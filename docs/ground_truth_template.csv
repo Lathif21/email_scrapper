@@ -1,0 +1,4 @@
+company,website,email_asli,whatsapp_asli,telepon_asli,catatan
+Sari Ater Kamboti Hotel Bandung,https://sariaterkamboti.com/contactus.html,info.kamboti@sariater.co.id,+62222011000,,contoh terisi - diverifikasi 2026-08-22; blok kontak terstruktur berisi email + WA + alamat
+Bumi Surabaya City Resort,https://bumisurabaya.com/,info@bumisurabaya.com,+6281133308900,+62315311234,contoh terisi - diverifikasi 2026-08-22; telepon rumah hanya muncul lewat tel:/JSON-LD
+CONTOH situs tanpa kontak,https://example.com/,,,,contoh negatif - sengaja kosong untuk uji false positive

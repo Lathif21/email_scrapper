@@ -222,6 +222,10 @@ class ContactResult:
     # nowhere to live before.
     page_type: str = "flat"
     address: str = ""
+    # "static" = requests was enough. "rendered" = a browser was needed AND
+    # added a contact. "rendered_empty" = rendered and still nothing. This is
+    # the number that decides whether Playwright is worth keeping.
+    render_mode: str = "static"
     # Numbers taken from a labelled block or a tel:/JSON-LD field, which are
     # explicit publications and so skip the mobile-length check.
     labeled_phones: set = field(default_factory=set)
@@ -524,6 +528,51 @@ LABELLED_LINE_REGEXES = {
 STREET_LINE_REGEX = re.compile(
     r"(?im)^\s*((?:jl\.?|jalan|gedung|komplek|kompleks|ruko)\s+.{6,160}?\b\d{5}\b.*)$"
 )
+
+
+# A real page with content is rarely this small. Below it, the body is almost
+# always a JS bootstrap shell.
+RENDER_HTML_SIZE_HINT = 5000
+
+# Framework mount points. Empty ones mean the content is injected by JS.
+SPA_ROOT_IDS = ("root", "app", "__next", "__nuxt", "vue-app")
+
+# <noscript> copy that says outright the page needs JavaScript.
+NOSCRIPT_JS_MARKERS = (
+    "enable javascript", "aktifkan javascript", "javascript is required",
+    "javascript must be enabled", "butuh javascript", "requires javascript",
+)
+
+
+def needs_render(html: str, result: "ContactResult") -> bool:
+    """True if the page looks JS-rendered AND has produced no contact yet.
+
+    Both conditions are required, and the cheap one is checked first: a page
+    that already yielded an email or a WhatsApp number is never re-fetched with
+    a browser, however SPA-shaped it looks. Rendering costs 3-8 seconds against
+    ~0.5 for requests, so this has to stay a narrow fallback.
+    """
+    if result is not None and result.total > 0:
+        return False
+    if not html:
+        return False
+
+    if len(html) < RENDER_HTML_SIZE_HINT:
+        return True
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    for root_id in SPA_ROOT_IDS:
+        node = soup.find(id=root_id)
+        if node is not None and not node.get_text(strip=True):
+            return True
+
+    for tag in soup.find_all("noscript"):
+        text = tag.get_text(" ", strip=True).lower()
+        if any(marker in text for marker in NOSCRIPT_JS_MARKERS):
+            return True
+
+    return False
 
 
 def _walk_json(node):
@@ -940,8 +989,55 @@ def _merge_contact_block(result: ContactResult, html: str, url: str) -> None:
         print(f"      [struct] skipped ({type(e).__name__}: {e})")
 
 
+def _maybe_render(result: ContactResult, html: str, url: str,
+                  renderer, respect_robots: bool) -> None:
+    """Re-fetch through a browser if the page looks JS-built and gave nothing.
+
+    Merges into `result`; never replaces. If the static pass found an email and
+    the render finds a WhatsApp number, both survive.
+
+    The whole block is wrapped: a Playwright bug must not be able to lose
+    contacts that requests already retrieved.
+    """
+    if renderer is None:
+        return
+    try:
+        if not needs_render(html, result):
+            result.render_mode = result.render_mode or "static"
+            return
+
+        # A real browser does not change what a site permits.
+        if respect_robots and not is_allowed_by_robots(url):
+            result.render_mode = "static"
+            return
+
+        rendered_html, error = renderer.fetch(url)
+        if error is not None or not rendered_html:
+            result.render_mode = "rendered_empty"
+            return
+
+        before = result.total
+        found = extract_contacts(rendered_html, url=url)
+        result.emails |= found.emails
+        result.whatsapp |= found.whatsapp
+        result.phones |= found.phones
+        if found.company and not result.company:
+            result.company = found.company
+        _merge_contact_block(result, rendered_html, url)
+
+        # The render only counts as worthwhile if it actually added something.
+        result.render_mode = "rendered" if result.total > before else "rendered_empty"
+        # A page reached through the browser is no longer an unexplained blank.
+        if result.error == "bot check / interstitial" and result.total > before:
+            result.error = None
+    except Exception as e:                              # noqa: BLE001
+        print(f"      [render] skipped ({type(e).__name__}: {e})")
+        result.render_mode = result.render_mode or "static"
+
+
 def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIMEOUT,
-               follow_contact: bool = True, delay: float = 0) -> ContactResult:
+               follow_contact: bool = True, delay: float = 0,
+               renderer=None) -> ContactResult:
     """Fetch a URL and extract contacts from it.
 
     When the page yields no email address and follow_contact is on, the contact
@@ -952,6 +1048,11 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
 
     Followed pages obey robots.txt and wait `delay` seconds between fetches,
     exactly like top-level ones.
+
+    `renderer` is an optional render_fetch.Renderer. With None — the default —
+    behaviour is completely unchanged. When given, a page that looks
+    JS-rendered AND produced no contact is fetched again through a real browser
+    and the two results are MERGED, never swapped.
     """
     if respect_robots and not is_allowed_by_robots(url):
         return ContactResult(url=url, error="blocked by robots.txt")
@@ -968,6 +1069,7 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
     # An email is the column that matters most, so that is the trigger. A page
     # that already published one needs no second request.
     if not follow_contact or result.emails:
+        _maybe_render(result, html, url, renderer, respect_robots)
         return result
 
     for link in find_contact_links(html, url):
@@ -994,6 +1096,8 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
         if result.emails:
             break
 
+    _maybe_render(result, html, url, renderer, respect_robots)
+
     # The merged sets can now disagree about a number that the contact page
     # published as a WhatsApp link and the homepage only as text.
     result.phones -= result.whatsapp
@@ -1001,7 +1105,8 @@ def scrape_url(url: str, respect_robots: bool = True, timeout: int = REQUEST_TIM
 
 
 def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
-                verbose: bool = True, follow_contact: bool = True) -> list:
+                verbose: bool = True, follow_contact: bool = True,
+                renderer=None) -> list:
     """Scrape a list of URLs sequentially with a delay. Returns list of ContactResult."""
     results = []
     total = len(urls)
@@ -1011,7 +1116,8 @@ def scrape_urls(urls, respect_robots: bool = True, delay: float = DEFAULT_DELAY,
             print(f"  [{i}/{total}] {url}")
 
         result = scrape_url(url, respect_robots=respect_robots,
-                            follow_contact=follow_contact, delay=delay)
+                            follow_contact=follow_contact, delay=delay,
+                            renderer=renderer)
         results.append(result)
 
         if verbose:
@@ -1041,7 +1147,7 @@ FIELDNAMES = [
     "phone", "other_emails", "other_whatsapp",
     # Task 04 Part B, inserted before search_query so consumers that read by
     # column name keep working and the existing order is unchanged.
-    "address", "page_type",
+    "address", "page_type", "render_mode",
     "search_query", "status",
 ]
 
@@ -1076,6 +1182,7 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
             "phones": set(),
             "address": "",
             "page_type": "flat",
+            "render_mode": "static",
             "search_query": "",
             "status": "",
         })
@@ -1090,6 +1197,12 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
         # Any structured page in the group makes the company structured.
         if result.page_type == "structured":
             entry["page_type"] = "structured"
+        # "rendered" is the most informative value, so it wins for the group.
+        if result.render_mode == "rendered":
+            entry["render_mode"] = "rendered"
+        elif (result.render_mode == "rendered_empty"
+              and entry["render_mode"] == "static"):
+            entry["render_mode"] = "rendered_empty"
 
         query = (extra_by_url.get(result.url) or {}).get("search_query", "")
         if query and not entry["search_query"]:
@@ -1125,6 +1238,7 @@ def results_to_rows(results, extra_by_url: dict = None, guess_email: bool = Fals
             "other_whatsapp": "; ".join(whatsapp[1:]),
             "address": entry["address"],
             "page_type": entry["page_type"],
+            "render_mode": entry["render_mode"],
             "search_query": entry["search_query"],
             "status": entry["status"] or "ok",
         })

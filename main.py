@@ -57,6 +57,22 @@ Search backend:
     There is no automatic fallback to it: running out of credit stops the run
     and says so.
 
+Rendering JavaScript pages:
+    --render re-fetches through a real browser ONLY the pages that produced no
+    contact and look JS-built. It is a fallback: requests is 3-8x faster and
+    most target sites are static. Needs `pip install playwright` plus
+    `playwright install chromium`; without them --render stops with an install
+    message rather than an ImportError.
+
+    Render results are merged with the static ones, never swapped, and a crash
+    in Playwright cannot lose what requests already found. robots.txt is still
+    checked before every fetch — a real browser does not change what a site
+    permits, and no stealth plugins or proxies are used, so a site that blocks
+    automated access stays skipped.
+
+    The render_mode column (static / rendered / rendered_empty) is what tells
+    you whether --render is earning its time.
+
 Resumable search:
     --continue keeps searching a query where it left off, and --restart wipes
     that query's progress. Progress lives in .search_state.db (SQLite).
@@ -338,12 +354,29 @@ def stage_parse(pairs: list, args) -> list:
             print("  Tidak ada URL baru untuk di-fetch.\n")
             return []
 
-    results = email_parser.scrape_urls(
-        urls,
-        respect_robots=not args.ignore_robots,
-        delay=args.scrape_delay,
-        follow_contact=not args.no_follow_contact,
-    )
+    renderer = None
+    if args.render:
+        from render_fetch import Renderer, RendererUnavailable
+        try:
+            renderer = Renderer(headless=not args.show_browser,
+                                timeout=args.render_timeout)
+        except RendererUnavailable as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print("  Render fallback aktif (browser dibuka sekali untuk batch ini)")
+
+    try:
+        results = email_parser.scrape_urls(
+            urls,
+            respect_robots=not args.ignore_robots,
+            delay=args.scrape_delay,
+            follow_contact=not args.no_follow_contact,
+            renderer=renderer,
+        )
+    finally:
+        # Closed even on Ctrl-C, so no Chromium is left running.
+        if renderer is not None:
+            renderer.close()
 
     # Remember the outcome so --skip-scraped can act on it next run. Always
     # recorded, not just when the flag is on — otherwise the first run with the
@@ -377,6 +410,15 @@ def stage_parse(pairs: list, args) -> list:
             if row["email_source"] == "guessed":
                 row["email"] = ""
                 row["email_source"] = ""
+
+    if args.render:
+        static = [r for r in results if r.render_mode == "static"]
+        rendered = [r for r in results if r.render_mode == "rendered"]
+        empty = [r for r in results if r.render_mode == "rendered_empty"]
+        print(f"    Static  : {len(static):3d} halaman "
+              f"({sum(1 for r in static if r.total):3d} dapat kontak)")
+        print(f"    Render  : {len(rendered) + len(empty):3d} halaman "
+              f"({len(rendered)} dapat kontak, {len(empty)} tetap kosong)")
 
     followed = sum(1 for r in results if r.followed)
     found = sum(1 for r in rows if r["email_source"] == "found")
@@ -491,6 +533,16 @@ def main():
     parser.add_argument("--skip-scraped", action="store_true",
                         help="Skip URLs already fetched successfully "
                              "(errors are always retried)")
+    # --- render fallback (Task 06) ---
+    parser.add_argument("--render", action="store_true",
+                        help="Use a real browser for pages that build "
+                             "themselves with JavaScript (needs playwright)")
+    parser.add_argument("--render-timeout", type=int, default=15000,
+                        metavar="MS",
+                        help="Render timeout in milliseconds (default: 15000)")
+    parser.add_argument("--show-browser", action="store_true",
+                        help="Run the browser visibly, for debugging --render")
+
     parser.add_argument("--state-db", default=search_state.DEFAULT_STATE_DB,
                         metavar="PATH",
                         help=f"Resume state file (default: "
