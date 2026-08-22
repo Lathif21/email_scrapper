@@ -81,7 +81,16 @@ SETUP_HINT = (
 
 
 class SerperCreditsExhausted(RuntimeError):
-    """Raised on HTTP 429 — no credit left, or rate limited."""
+    """Raised on HTTP 429 — no credit left, or rate limited.
+
+    `partial` carries results collected before the limit hit. Those pages were
+    already billed, so dropping them is the expensive mistake; search_many()
+    keeps them and still stops the batch.
+    """
+
+    def __init__(self, *args, partial=None):
+        super().__init__(*args)
+        self.partial = list(partial or [])
 
 
 class SerperAuthError(RuntimeError):
@@ -137,7 +146,7 @@ class SerperSearch:
 
     # ---------- transport ----------
 
-    def _post(self, query: str, num: int) -> Optional[dict]:
+    def _post(self, query: str, num: int, page: int = 1) -> Optional[dict]:
         """One API call. Returns parsed JSON, or None if this query is a write-off.
 
         Raises SerperAuthError (401/403) and SerperCreditsExhausted (429) —
@@ -146,6 +155,10 @@ class SerperSearch:
         """
         headers = {"X-API-KEY": self.api_key, "Content-Type": "application/json"}
         payload = {"q": query, "gl": "id", "hl": "id", "num": num}
+        if page > 1:
+            # Serper paginates with `page`, not an offset. Each page costs the
+            # same as the first, so this is only walked when resuming.
+            payload["page"] = page
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -231,8 +244,27 @@ class SerperSearch:
 
     # ---------- public API ----------
 
-    def search(self, query: str, num_results: int = 10) -> list:
-        """Search one query. Always a single API call — see the credit model."""
+    def search(self, query: str, num_results: int = 10,
+               resume_state: dict = None) -> list:
+        """Search one query.
+
+        Without `resume_state`: exactly one API call — see the credit model.
+
+        With `resume_state`: walk Serper's `page` parameter from the stored
+        position, filtering every result against the URLs this query has
+        already produced, until `num_results` NEW URLs are collected or the
+        query runs dry. Returns only the new ones.
+
+        `resume_state` is a dict:
+            {"db_path", "key", "engine", "state" (row or None)}
+
+        Progress is saved per page, not once at the end: a run that dies partway
+        (Ctrl-C, out of credit, crash) must not make the next --continue re-buy
+        pages that were already paid for.
+        """
+        if resume_state is not None:
+            return self._search_resumable(query, num_results, resume_state)
+
         cache_key = f"serper_{query}_{num_results}"
         if cache_key in self.cache:
             print(f"Searching: '{query}'")
@@ -280,20 +312,130 @@ class SerperSearch:
         print(f"  Got {len(results)} result(s)\n")
         return results
 
+    def _search_resumable(self, query: str, num_results: int,
+                          resume: dict) -> list:
+        """Collect `num_results` URLs this query has not returned before."""
+        import search_state as st
+
+        db_path = resume["db_path"]
+        key = resume["key"]
+        engine = resume.get("engine", "serper")
+        state = resume.get("state") or {}
+        label = resume.get("typed") or query
+
+        if state.get("exhausted_at"):
+            print(f"Query \"{label}\" habis pada {state['exhausted_at']} "
+                  f"setelah {state.get('total_seen', 0)} URL.")
+            print("Pakai --restart untuk mengulang dari awal.\n")
+            return []
+
+        page = max(1, int(state.get("next_page") or 1))
+        empty_streak = int(state.get("empty_streak") or 0)
+        seen = st.get_seen_urls(db_path, key)
+
+        run_count = int(state.get("run_count") or 0)
+        if run_count:
+            print(f"Query: \"{label}\" [{engine}]")
+            print(f"  Run sebelumnya: {run_count} | URL terkumpul: "
+                  f"{state.get('total_seen', 0)} | Lanjut dari halaman {page}")
+        else:
+            print(f"Query: \"{label}\" [{engine}] | Run pertama")
+        st.bump_run_count(db_path, key)
+
+        num = max(1, min(num_results, MAX_RESULTS_PER_CALL))
+        if num > FREE_TIER_SAFE_NUM and _has_search_operators(query):
+            num = FREE_TIER_SAFE_NUM
+
+        collected, overlap = [], 0
+
+        while len(collected) < num_results:
+            cost = 1 if num <= CHEAP_CALL_THRESHOLD else 2
+            print(f"  [HALAMAN {page}] ~{cost} credit(s)")
+
+            try:
+                data = self._post(query, num, page=page)
+            except SerperCreditsExhausted as e:
+                # Pages already fetched were billed. Hand them back with the
+                # exception so the batch stops without throwing them away.
+                print(f"  +{len(collected)} URL baru sebelum kredit habis "
+                      f"({overlap} sudah pernah, disaring)")
+                raise SerperCreditsExhausted(*e.args,
+                                             partial=collected[:num_results])
+            if data is None:
+                break
+            self.credits_used += cost
+
+            page_results = self._parse(data, query)
+            fresh = [r for r in page_results if r["url"] not in seen]
+            overlap += len(page_results) - len(fresh)
+
+            for row in fresh:
+                seen.add(row["url"])
+                collected.append(row)
+
+            page += 1
+            empty_streak = empty_streak + 1 if not fresh else 0
+
+            # Save after every page, so an interrupted run keeps what it paid for.
+            st.record_results(db_path, key, label, engine,
+                              [r["url"] for r in fresh], page, empty_streak)
+
+            if empty_streak >= st.EMPTY_PAGES_TO_EXHAUST:
+                st.mark_exhausted(db_path, key)
+                print(f"  Query habis: {st.EMPTY_PAGES_TO_EXHAUST} halaman "
+                      "berturut-turut tanpa URL baru.")
+                break
+
+            if not page_results:
+                break
+
+        collected = collected[:num_results]
+        print(f"  +{len(collected)} URL baru ({overlap} sudah pernah, disaring)"
+              f" | Total: {len(seen)}\n")
+        return collected
+
     def search_many(self, queries: list, num_results: int = 10,
-                    delay: float = 2) -> list:
+                    delay: float = 2, resume_db: str = None,
+                    base_queries: dict = None) -> list:
         """Run several queries in sequence. Returns one flat list of dicts.
 
         On 429 the batch stops immediately — the remaining queries would all
         fail — but everything collected so far is still returned. Those results
         were already paid for; discarding them is the expensive mistake here.
+        With `resume_db`, the per-page state saved before the 429 stays valid, so
+        the next run picks up from the last page that succeeded.
+
+        `resume_db` turns on resumable mode. `base_queries` maps the query that
+        will be SENT (operators appended) to the query the user TYPED, because
+        the state key must be computed from the latter — otherwise editing the
+        blocklist orphans every query's history.
         """
         all_results = []
+        base_queries = base_queries or {}
 
         for i, query in enumerate(queries, 1):
+            resume_state = None
+            if resume_db:
+                import search_state as st
+                typed = base_queries.get(query, query)
+                key = st.make_key(typed, "serper")
+                resume_state = {
+                    "db_path": resume_db,
+                    "key": key,
+                    # Stored and displayed as typed: the operators are noise
+                    # here and identical on every query in the run.
+                    "typed": typed,
+                    "engine": "serper",
+                    "state": st.load_state(resume_db, key),
+                }
+
             try:
-                all_results.extend(self.search(query, num_results=num_results))
+                all_results.extend(self.search(query, num_results=num_results,
+                                               resume_state=resume_state))
             except SerperCreditsExhausted as e:
+                # Whatever this query managed to collect before the limit was
+                # already paid for — keep it.
+                all_results.extend(getattr(e, "partial", []))
                 remaining = len(queries) - i + 1
                 print(f"\n[KREDIT HABIS] {i - 1} dari {len(queries)} query selesai. "
                       f"Sisa {remaining} belum dijalankan.")

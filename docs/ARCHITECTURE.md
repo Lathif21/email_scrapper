@@ -248,3 +248,49 @@ the pattern; contacts can follow the same approach with a `UNIQUE` constraint on
 
 **Dashboard integration.** Use `decrypt.load_encrypted_csv()` — it decrypts in
 memory and returns dicts, so plaintext never touches disk.
+
+
+---
+
+## Resume state (Task 05)
+
+`search_state.py` over one SQLite file, `.search_state.db`. Three tables:
+`query_state` (per query: next page, totals, exhaustion), `seen_urls` (every URL
+a query has produced), `scraped_urls` (what stage 2 fetched, and how it went).
+
+**Why a URL set beats an offset.** Search rankings are not stable — the same
+query returns a different order days later, so "resume at result 101" points
+somewhere different each time. The set of URLs already returned is stable, so
+resuming is defined as *keep searching until N unseen URLs are collected*.
+Overlap between runs is expected and filtered, not an error, and the overlap
+count is reported because a rising figure is the early warning that the query is
+running dry.
+
+**Why `page`, not an offset.** Serper returns up to 100 results for 2 credits in
+one call, and a deeper page costs the same again. There is no cheap pagination
+to walk, so state stores `next_page` and each resumed page is a deliberate,
+priced decision.
+
+**Exhaustion is empirical.** Real depth varies by query and account tier, so
+nothing is hardcoded: a page yielding zero new URLs is empty, and two
+consecutive empty pages mark the query exhausted. Later `--continue` runs on an
+exhausted query return immediately without an API call.
+
+**Saved per page, not per run.** If a run dies partway — Ctrl-C, out of credit,
+a crash — the next `--continue` must not re-buy pages that were already billed.
+On HTTP 429 the partial results travel out attached to the exception so the
+batch stops without discarding what it paid for.
+
+**The state key comes from the query as typed**, before `--negative-ops` appends
+`-site:` operators. Keying on the sent query would mean that editing
+`blocklist.txt` changes the operators, changes the key, and silently orphans
+every query's history.
+
+**The cache is bypassed while resuming.** `SerperSearch` caches by query, so a
+resumed run would otherwise be served run 1's results and the feature would
+appear to do nothing. A page-aware cache was rejected as more complicated than
+the problem.
+
+**`error` is not in the skip list.** `--skip-scraped` skips `ok`,
+`robots_blocked` and `blocked_domain`. A transient failure must stay retryable
+rather than becoming a permanent blacklist entry.

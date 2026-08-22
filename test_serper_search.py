@@ -386,17 +386,40 @@ class CacheTests(unittest.TestCase):
 class InterfaceCompatibilityTests(unittest.TestCase):
     """Spec item 10 — main.py swaps the two backends freely."""
 
-    def test_search_signature_matches(self):
-        self.assertEqual(
-            inspect.signature(SerperSearch.search),
-            inspect.signature(gss.SearchScraper.search),
-        )
+    def _assert_interchangeable(self, name):
+        """Every parameter Bing takes, Serper takes the same way.
 
-    def test_search_many_signature_matches(self):
-        self.assertEqual(
-            inspect.signature(SerperSearch.search_many),
-            inspect.signature(gss.SearchScraper.search_many),
-        )
+        Not strict signature equality: Task 05 adds optional resume parameters
+        to the Serper backend. What must hold is that main.py can call either
+        backend identically — so the shared parameters match in name, order and
+        default, and anything extra has a default.
+        """
+        bing = inspect.signature(getattr(gss.SearchScraper, name)).parameters
+        serper = inspect.signature(getattr(SerperSearch, name)).parameters
+
+        bing_names = list(bing)
+        self.assertEqual(list(serper)[:len(bing_names)], bing_names)
+        for param in bing_names:
+            self.assertEqual(serper[param].default, bing[param].default,
+                             f"{name}({param}) default drifted")
+
+        for extra in list(serper)[len(bing_names):]:
+            self.assertIsNot(serper[extra].default, inspect.Parameter.empty,
+                             f"{name}({extra}) must be optional")
+
+    def test_search_is_interchangeable_with_the_bing_backend(self):
+        self._assert_interchangeable("search")
+
+    def test_search_many_is_interchangeable_with_the_bing_backend(self):
+        self._assert_interchangeable("search_many")
+
+    def test_bing_style_call_still_works_unchanged(self):
+        """The positional/keyword form main.py uses must keep working."""
+        payload = organic("https://a.co.id/")
+        with mock.patch("requests.post",
+                        return_value=FakeResponse(payload=payload)) as post:
+            make_scraper().search("x", num_results=10)
+        self.assertEqual(post.call_count, 1)
 
     def test_both_backends_accept_a_cache_file(self):
         for cls in (SerperSearch, gss.SearchScraper):

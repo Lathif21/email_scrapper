@@ -396,6 +396,64 @@ one class behind a two-method interface, so it can be swapped.
 
 ---
 
+## Resumable search
+
+Two runs of the same command collect *different* URLs instead of the same ones:
+
+```bash
+python main.py "hotel bintang 5 Bali kontak" --continue     # run 1
+python main.py "hotel bintang 5 Bali kontak" --continue     # run 2, continues
+python main.py "hotel bintang 5 Bali kontak" --restart      # start over
+python main.py --list-progress                              # what's collected
+```
+
+Without these flags nothing changes. Progress lives in `.search_state.db`
+(SQLite, gitignored — it holds URLs and query history).
+
+**Read this before deciding it's broken.** Two properties of search surprise
+people who expect precise offset ranges:
+
+- **Rankings are not stable.** The same query returns a different order days
+  later, so an offset is not a usable cursor. What is tracked is the *set of
+  URLs already returned*. "Continue" means *keep searching until I have N URLs
+  I have not seen* — never *give me results 101-200*. Overlap between runs is
+  normal and gets filtered; the count is printed so you can watch it grow:
+
+  ```
+  +87 URL baru (13 sudah pernah, disaring) | Total: 187
+  ```
+
+- **Depth is limited.** After two consecutive pages with nothing new, the query
+  is marked exhausted and later `--continue` runs stop immediately instead of
+  spending credit:
+
+  ```
+  Query "hotel bintang 5 Bali kontak" habis pada 2026-08-25 setelah 137 URL.
+  Pakai --restart untuk mengulang dari awal.
+  ```
+
+  Rising overlap is the early warning before that message appears.
+
+### `--skip-scraped` — the bigger saving
+
+Resuming the search saves collecting URLs. The real time sink is stage 2
+re-fetching pages it already processed. `--skip-scraped` skips URLs already
+fetched with status `ok`, `robots_blocked` or `blocked_domain`:
+
+```
+[STAGE 2/3] Contact extraction
+  Melewati 142 URL yang sudah di-scrape. Mem-fetch 45.
+```
+
+Rows that **errored are always retried** — a transient network failure must not
+become a permanent blacklist.
+
+`--continue` skips the search cache for the query being paginated (the cache
+would otherwise re-serve run 1's results and the feature would silently do
+nothing). It says so when both flags are used.
+
+---
+
 ## Query quality
 
 Most search results are structurally incapable of yielding a contact. An OTA

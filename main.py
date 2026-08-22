@@ -57,6 +57,22 @@ Search backend:
     There is no automatic fallback to it: running out of credit stops the run
     and says so.
 
+Resumable search:
+    --continue keeps searching a query where it left off, and --restart wipes
+    that query's progress. Progress lives in .search_state.db (SQLite).
+
+    Two caveats, or this will look broken: search rankings are NOT stable, so
+    what is tracked is the SET of URLs already returned, not an offset — "keep
+    going until I have N I have not seen", never "give me results 101-200". And
+    search depth is limited: a query runs dry after a couple of pages with
+    nothing new, and then says so instead of spending more credit.
+
+    --skip-scraped is the bigger saving: it skips URLs already fetched
+    successfully. Rows that errored are always retried, because a transient
+    failure must not become a permanent blacklist.
+
+    --list-progress prints what every tracked query has collected.
+
 Password (for --encrypt) resolves in this order:
     1. --password argument
     2. SCRAPER_PASSWORD environment variable  (recommended)
@@ -71,6 +87,7 @@ import time
 import email_parser
 import google_search_scrapper as searcher
 import query_tools
+import search_state
 from encrypt import encrypt_file, resolve_password
 
 
@@ -102,6 +119,25 @@ def _confirm_credit_spend(estimate: int, args) -> bool:
         print("(stdin tidak interaktif — dianggap 'no')")
         return False
     return answer in ("y", "yes")
+
+
+def _print_progress(state_db: str) -> None:
+    """--list-progress: what every tracked query has collected so far."""
+    rows = search_state.list_queries(state_db)
+    if not rows:
+        print(f"Belum ada progres tersimpan di '{state_db}'.")
+        return
+
+    width = min(max(len(r["query_text"]) for r in rows), 46)
+    print(f"{'QUERY'.ljust(width)}  ENGINE  RUN   URL  STATUS   TERAKHIR")
+    for row in rows:
+        query = row["query_text"]
+        if len(query) > width:
+            query = query[:width - 1] + "…"
+        status = "habis" if row["exhausted_at"] else "aktif"
+        last = (row["last_run_at"] or "")[:10]
+        print(f"{query.ljust(width)}  {row['engine']:<6}  {row['run_count']:>3}  "
+              f"{row['total_seen']:>4}  {status:<7}  {last}")
 
 
 def stage_search(args) -> tuple:
@@ -145,10 +181,33 @@ def stage_search(args) -> tuple:
     elif not args.no_blocklist:
         print(f"Blocklist: '{args.blocklist}' tidak ditemukan — tidak menyaring")
 
+    # State keys are computed from the query as TYPED, before operators are
+    # appended — otherwise editing the blocklist orphans every query's history.
+    typed_queries = list(queries)
+
     if args.negative_ops and blocklist:
         seeds = query_tools.top_blocked_domains({}, blocklist=blocklist)
         queries = [query_tools.add_negative_operators(q, seeds) for q in queries]
         print(f"Operator negatif: {', '.join(seeds)}")
+
+    base_queries = dict(zip(queries, typed_queries))
+
+    if args.restart:
+        for typed in typed_queries:
+            search_state.reset_query(args.state_db,
+                                     search_state.make_key(typed, args.engine))
+        print(f"--restart: progres {len(typed_queries)} query dihapus dari "
+              f"'{args.state_db}'")
+
+    resume_db = None
+    if args.resume:
+        if args.engine != "serper":
+            print("Error: --continue hanya didukung untuk --engine serper.",
+                  file=sys.stderr)
+            sys.exit(1)
+        resume_db = args.state_db
+        if args.cache:
+            print("Catatan: --continue melewati cache untuk query berpaginasi.")
     print()
 
     if args.engine == "serper":
@@ -174,11 +233,20 @@ def stage_search(args) -> tuple:
         scraper = searcher.SearchScraper(engine=args.engine,
                                          cache_file=cache_file)
 
-    results = scraper.search_many(
-        queries,
-        num_results=args.num_results,
-        delay=args.search_delay,
-    )
+    if resume_db:
+        results = scraper.search_many(
+            queries,
+            num_results=args.num_results,
+            delay=args.search_delay,
+            resume_db=resume_db,
+            base_queries=base_queries,
+        )
+    else:
+        results = scraper.search_many(
+            queries,
+            num_results=args.num_results,
+            delay=args.search_delay,
+        )
 
     if args.engine == "serper":
         print(f"Kredit terpakai: {scraper.credits_used} "
@@ -255,12 +323,36 @@ def stage_parse(pairs: list, args) -> list:
     urls = [url for url, _ in pairs]
     query_by_url = {url: query for url, query in pairs}
 
+    if args.skip_scraped:
+        # The real time sink is stage 2 re-fetching pages already processed.
+        # `error` rows are absent from the skip list on purpose: a transient
+        # failure must not become a permanent blacklist.
+        already = search_state.get_scraped(args.state_db)
+        keep = [u for u in urls if u not in already]
+        skipped = len(urls) - len(keep)
+        if skipped:
+            print(f"  Melewati {skipped} URL yang sudah di-scrape. "
+                  f"Mem-fetch {len(keep)}.")
+        urls = keep
+        if not urls:
+            print("  Tidak ada URL baru untuk di-fetch.\n")
+            return []
+
     results = email_parser.scrape_urls(
         urls,
         respect_robots=not args.ignore_robots,
         delay=args.scrape_delay,
         follow_contact=not args.no_follow_contact,
     )
+
+    # Remember the outcome so --skip-scraped can act on it next run. Always
+    # recorded, not just when the flag is on — otherwise the first run with the
+    # flag has nothing to skip.
+    for result in results:
+        search_state.record_scraped(
+            args.state_db, result.url,
+            search_state.classify_scrape_status(result.error),
+            result.total)
 
     extra_by_url = {url: {"search_query": query_by_url.get(url, "")} for url in urls}
     rows = email_parser.results_to_rows(
@@ -389,6 +481,21 @@ def main():
     parser.add_argument("--save-yield", default=None, metavar="PATH",
                         help="Write per-query yield (URLs / new / contacts) to CSV")
 
+    # --- resumable search (Task 05) ---
+    parser.add_argument("--continue", dest="resume", action="store_true",
+                        help="Continue this query from where it left off")
+    parser.add_argument("--restart", action="store_true",
+                        help="Discard this query's progress and start over")
+    parser.add_argument("--list-progress", action="store_true",
+                        help="Show progress for every tracked query, then exit")
+    parser.add_argument("--skip-scraped", action="store_true",
+                        help="Skip URLs already fetched successfully "
+                             "(errors are always retried)")
+    parser.add_argument("--state-db", default=search_state.DEFAULT_STATE_DB,
+                        metavar="PATH",
+                        help=f"Resume state file (default: "
+                             f"{search_state.DEFAULT_STATE_DB})")
+
     # --- parse options ---
     parser.add_argument("--scrape-delay", type=float, default=2,
                         help="Seconds between page fetches (default: 2)")
@@ -416,6 +523,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.list_progress:
+        _print_progress(args.state_db)
+        return
+
     email_parser.set_free_mail_filter(args.ignore_free_mail)
 
     if args.batch and args.skip_search:
@@ -425,6 +536,11 @@ def main():
     if args.expand and (args.batch or args.skip_search):
         print("Error: --expand tidak bisa digabung dengan --batch atau "
               "--skip-search.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.resume and args.restart:
+        print("Error: --continue dan --restart saling eksklusif.",
+              file=sys.stderr)
         sys.exit(1)
 
     print(BANNER)
